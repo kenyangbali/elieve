@@ -90,7 +90,8 @@ class TestRegistry(unittest.TestCase):
     def test_dispatch_complete(self):
         self.assertEqual(
             set(DISPATCH.keys()),
-            {"read_file", "list_dir", "grep", "exec", "remember"},
+            {"read_file", "list_dir", "grep", "exec", "remember",
+             "task_update"},
         )
 
     def test_schemas_have_names(self):

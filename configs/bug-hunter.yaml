@@ -61,6 +61,40 @@ permissions:
   kilat_timeout_s: 10         # timeout singkat tahap 1
   max_consecutive_failures: 3 # auto-disable classifier setelah N gagal beruntun
 
+# Gap 1 — hook lifecycle system (docs/HOOKS.md, hermes/hooks.py).
+# Event deterministik yang tidak bisa di-skip model. Tiap aksi EITHER
+# {action: nama_terdaftar} OR {shell: cmd, timeout: detik, blocking: bool}.
+hooks:
+  PreToolUse:
+    - {action: "block_destructive_exec"}  # tolak exec destruktif (deterministik, tanpa LLM)
+  PostToolUse:
+    - {action: "qc_tool_output"}          # flag output >12000 char / Traceback
+  PreCompact:
+    - {action: "checkpoint_state"}        # tulis <outdir>/.precompact.json
+  OnStop:
+    - {action: "persist_state"}           # persist state di semua jalur keluar
+
+# Gap 2 — structured task tracking (hermes/tasks.py, docs/TASKS.md).
+# Checklist per-run: tool task_update (add/set/list), persist otomatis ke
+# <outdir>/tasks.json, ringkasan "## Daftar task" disuntik ke system
+# prompt tiap turn (<300 char, survive compaction).
+tasks:
+  enabled: true
+  max_tasks: 64            # add() di atas batas ditolak
+  summary_max_chars: 300   # batas ringkasan di system prompt
+
+# Gap 3 — akuntansi token & estimasi biaya (hermes/accounting.py).
+# Harga = USD per 1K token. Nilai di bawah = PLACEHOLDER —
+# sesuaikan dengan harga aktual provider sebelum dipakai untuk budgeting.
+accounting:
+  enabled: true
+  prices:
+    ag/claude-opus-4-6-thinking: {input_per_1k: 0.015, output_per_1k: 0.075}
+    ag/gemini-3.1-pro: {input_per_1k: 0.0025, output_per_1k: 0.01}
+    ag/gemini-3-flash: {input_per_1k: 0.0005, output_per_1k: 0.002}
+  run_cost_cap: 0.0        # USD; 0 = nonaktif. Bila tercapai -> stop rapi (status cost_capped, return 0)
+  context_warn_pct: 80     # warning saat prompt_tokens >= N% dari compaction.context_limit
+
 # Fase 4 — multi-agent orchestration (docs/ARCHITECTURE.md §4).
 # OPSIONAL & PLUGGABLE ("by choose", keputusan Bayu 2026-10-09):
 #   - orchestrator_model KOSONG atau enabled=false -> 100% single-agent (default lama)

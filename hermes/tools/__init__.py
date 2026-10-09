@@ -54,6 +54,9 @@ from .read import read_file, list_dir, READ_SCHEMAS  # noqa: E402
 from .search import grep, SEARCH_SCHEMAS  # noqa: E402
 from .exec import exec as run_exec, EXEC_SCHEMAS  # noqa: E402
 from .memory import remember, REMEMBER_SCHEMAS, bind_memory, unbind_memory  # noqa: E402
+from .tasks import (  # noqa: E402
+    task_update, TASK_SCHEMAS, bind_tasks, unbind_tasks,
+)
 
 DISPATCH = {
     "read_file": read_file,
@@ -61,9 +64,13 @@ DISPATCH = {
     "grep": grep,
     "exec": run_exec,
     "remember": remember,
+    "task_update": task_update,
 }
 
-TOOL_SCHEMAS = READ_SCHEMAS + SEARCH_SCHEMAS + EXEC_SCHEMAS + REMEMBER_SCHEMAS
+TOOL_SCHEMAS = (
+    READ_SCHEMAS + SEARCH_SCHEMAS + EXEC_SCHEMAS
+    + REMEMBER_SCHEMAS + TASK_SCHEMAS
+)
 
 __all__ = [
     "ToolError",
@@ -74,6 +81,9 @@ __all__ = [
     "grep",
     "run_exec",
     "remember",
+    "task_update",
     "bind_memory",
     "unbind_memory",
+    "bind_tasks",
+    "unbind_tasks",
 ]

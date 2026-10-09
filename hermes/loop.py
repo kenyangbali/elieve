@@ -28,8 +28,19 @@ import sys
 import time
 from datetime import datetime, timezone
 
-from .tools import DISPATCH, TOOL_SCHEMAS, ToolError, bind_memory, unbind_memory
+from .tools import (
+    DISPATCH, TOOL_SCHEMAS, ToolError,
+    bind_memory, unbind_memory,
+    bind_tasks, unbind_tasks,
+)
 from .permissions import PermissionGate
+from .hooks import HookRunner
+from .accounting import Accounting
+from .tasks import (
+    TaskList,
+    DEFAULT_MAX_TASKS,
+    DEFAULT_SUMMARY_MAX_CHARS,
+)
 from .memory import (
     AgentMemory,
     DEFAULT_MAX_FACT_CHARS,
@@ -46,6 +57,8 @@ from .compaction import (
     DEFAULT_THRESHOLDS,
     apply_threshold_pipeline,
     estimate_tokens,
+    fire_post_compact,
+    fire_pre_compact,
     full_compact,
     micro_compact,
 )
@@ -74,9 +87,12 @@ ATURAN KERAS (melanggar = gagal):
 5. Jika ragu apakah sesuatu bug atau bukan, catat sebagai "perlu verifikasi", jangan dipaksakan jadi temuan.
 
 CARA KERJA:
-- Gunakan function call yang tersedia: read_file, list_dir, grep, exec, remember.
+- Gunakan function call yang tersedia: read_file, list_dir, grep, exec, remember, task_update.
 - Tool `remember`: simpan pelajaran/pola penting ke ingatan sesi (MEMORY.md).
   JANGAN PERNAH simpan API key, token, password, atau kredensial apa pun.
+- Tool `task_update`: kelola daftar task (add/set/list). Buat task untuk
+  tiap langkah kerja berarti, tandai in_progress saat dikerjakan dan
+  completed saat selesai. Satu task in_progress dalam satu waktu.
 - Setelah semua bukti terkumpul (atau tidak ada temuan), BERHENTI memanggil tool dan tulis LAPORAN AKHIR sebagai jawaban teks biasa — itu yang akan disimpan sebagai hasil.
 - Format laporan akhir:
   ## <judul temuan>
@@ -229,13 +245,21 @@ class HermesLoop:
 
     def __init__(self, task, outdir, model=DEFAULT_MODEL, max_steps=40,
                  system_prompt=SYSTEM_PROMPT, compaction_cfg=None,
-                 memory_cfg=None, permissions_cfg=None, no_exec=False):
+                 memory_cfg=None, permissions_cfg=None, no_exec=False,
+                 hooks_cfg=None, tasks_cfg=None,
+                 accounting_cfg=None):
         self.task = task
         self.outdir = outdir
         self.model = validate_model(model)
         self.max_steps = max_steps
         self.system_prompt = system_prompt
         self.api_key = get_api_key()
+        # Gap 1 — hook lifecycle (deterministik, tidak bisa di-skip model).
+        # hooks_cfg None/kosong -> semua event no-op.
+        self.hooks = HookRunner(hooks_cfg, outdir=outdir)
+        self._step = 0
+        self._last_tool = None
+        self._qc_flags = []
         # Toolset per-run (Fase 4): worker read-only membuang `exec`.
         self.no_exec = bool(no_exec)
         self.dispatch = dict(DISPATCH)
@@ -260,6 +284,15 @@ class HermesLoop:
             self.compaction.update(compaction_cfg)
         # validasi awal: summarizer wajib ag/* (bns/*/oc/* ditolak di kode)
         _validate_compaction_model(self.compaction["summarizer_model"])
+        # Gap 3 — akuntansi token/biaya (hermes/accounting.py).
+        # accounting_cfg None/kosong -> enabled default true, cap nonaktif.
+        # context_limit diambil dari config compaction (fallback chars/4
+        # bila provider tak mengirim usage).
+        self.acct = Accounting(
+            accounting_cfg,
+            outdir=outdir,
+            context_limit=self.compaction["context_limit"],
+        )
         # Konfigurasi memory (Fase 2).
         self.memory_cfg = {
             "enabled": True,
@@ -290,6 +323,24 @@ class HermesLoop:
             main_api_key=self.api_key,
             audit_path=os.path.join(outdir, "permission_audit.jsonl"),
         )
+        # Gap 2 — structured task tracking (hermes/tasks.py).
+        # tasks_cfg None/kosong -> enabled default true.
+        self.tasks_cfg = {
+            "enabled": True,
+            "max_tasks": DEFAULT_MAX_TASKS,
+            "summary_max_chars": DEFAULT_SUMMARY_MAX_CHARS,
+        }
+        if tasks_cfg:
+            self.tasks_cfg.update(tasks_cfg)
+        self.tasks = None
+        if self.tasks_cfg.get("enabled", True):
+            self.tasks = TaskList(
+                os.path.join(outdir, "tasks.json"),
+                max_tasks=self.tasks_cfg["max_tasks"],
+            )
+            bind_tasks(self.tasks)
+        else:
+            unbind_tasks()
         if self.model not in ALLOWED_MODELS:
             print(
                 f"[hermes] peringatan: '{self.model}' bukan daftar dikenal; "
@@ -314,6 +365,50 @@ class HermesLoop:
         )
         with open(os.path.join(self.outdir, "OUT.md"), "w") as f:
             f.write(header + (content or "(kosong)"))
+
+    # -- accounting (Gap 3) ------------------------------------------
+
+    def _accounting_after_call(self, usage, messages, step):
+        """Catat usage tiap selesai call_model + guardrail.
+
+        - record() ke UsageTracker (fallback estimasi chars/4 bila provider
+          tak mengirim usage; ditandai estimated=True).
+        - warning konteks bila prompt_tokens >= context_warn_pct%.
+        - simpan usage.json berkala tiap 10 step (best effort).
+        - cek run_cost_cap.
+        Kembalikan True bila cap tercapai -> pemanggil menghentikan run
+        dengan rapi (status cost_capped, return 0, bukan crash).
+        """
+        if not self.acct.enabled:
+            return False
+        estimated = not (usage or {}).get("prompt_tokens")
+        if estimated:
+            usage = {"prompt_tokens": estimate_tokens(messages),
+                     "completion_tokens": 0}
+        self.acct.tracker.record(self.model, usage, estimated=estimated)
+        self.acct.check_context_warning(
+            (usage or {}).get("prompt_tokens") or 0)
+        self.acct.maybe_periodic_save(step)
+        if self.acct.cap_reached():
+            print(f"[hermes] {self.acct.cap_message()}", flush=True)
+            return True
+        return False
+
+    def _finish_accounting(self):
+        """Gap 3: tulis <outdir>/usage.json + cetak ringkasan ke stdout.
+
+        Dipanggil di SEMUA jalur keluar run (done/max_steps/error/
+        rate_limited/cost_capped). Best effort — tidak boleh crash-kan run.
+        """
+        if not self.acct.enabled:
+            return
+        try:
+            path = self.acct.save()
+        except Exception as e:
+            print(f"[accounting] gagal tulis usage.json: {e}", flush=True)
+        else:
+            print(f"[hermes] usage.json ditulis: {path}", flush=True)
+        print(self.acct.summary_text(), flush=True)
 
     # -- tool dispatch -----------------------------------------------
 
@@ -346,6 +441,79 @@ class HermesLoop:
             )
         return True, self._run_tool(name, args)
 
+    # -- hook lifecycle (Gap 1) ---------------------------------------
+
+    def _hook_ctx_base(self, extra=None):
+        """Ctx dasar untuk semua hook: step, outdir, task, last_tool, dll."""
+        ctx = {
+            "step": self._step,
+            "outdir": self.outdir,
+            "task": self.task,
+            "last_tool": self._last_tool,
+            "qc_flags": list(self._qc_flags),
+            # Gap 2: ringkasan task NYATA dari TaskList (bukan placeholder).
+            "tasks_summary": self.tasks.summary() if self.tasks else "",
+        }
+        if extra:
+            ctx.update(extra)
+        return ctx
+
+    def _dispatch_tool(self, name, args):
+        """Jalur penuh satu tool call: PreToolUse -> permission gate ->
+        eksekusi -> PostToolUse.
+
+        PreToolUse diblokir (allowed=False) -> tool TIDAK dijalankan;
+        model diberi pesan blokir dan loop lanjut normal (tidak crash).
+        Kembalikan teks hasil tool."""
+        ctx = self._hook_ctx_base({
+            "tool_name": name,
+            "tool_args": args or {},
+        })
+        allowed, reasons = self.hooks.pre_tool_use(ctx)
+        if not allowed:
+            reason = "; ".join(r for r in reasons if r) or "ditolak"
+            print(
+                f"[hermes]   hook PreToolUse: BLOKIR {name}: {reason[:160]}",
+                flush=True,
+            )
+            result = f"HOOK DITOLAK oleh PreToolUse: {reason}"
+        elif name not in self.dispatch:
+            result = f"tool tidak dikenal: {name}"
+        else:
+            print(f"[hermes]   tool: {name} {str(args)[:120]}", flush=True)
+            _ok, result = self._gated_tool(name, args)
+        post = self.hooks.post_tool_use(
+            dict(ctx, tool_output=str(result)))
+        flags = post.get("qc_flags") or []
+        if flags:
+            self._qc_flags.extend(flags)
+            print(
+                f"[hermes]   hook PostToolUse: qc_flags={flags}",
+                flush=True,
+            )
+        if post.get("blocked"):
+            result = (
+                "[QC] hook PostToolUse menandai output "
+                "(shell blocking gagal).\n" + str(result)
+            )
+        return result
+
+    def _fire_on_stop(self, status, note=""):
+        """OnStop di semua jalur keluar loop; tidak boleh crash-kan run."""
+        try:
+            self.hooks.on_stop(
+                self._hook_ctx_base({"status": status, "note": note}))
+        except Exception as e:  # belt-and-suspenders
+            print(f"[hermes] hook OnStop gagal: {e}", flush=True)
+
+    def _fire_on_error(self, err):
+        """OnError: catat ke errors.jsonl + jalankan hook OnError."""
+        try:
+            self.hooks.on_error(
+                self._hook_ctx_base({"error": str(err)[:1000]}))
+        except Exception as e:  # belt-and-suspenders
+            print(f"[hermes] hook OnError gagal: {e}", flush=True)
+
     # -- compaction (Fase 1) ------------------------------------------
 
     def _summarize_for_compaction(self, messages):
@@ -371,6 +539,9 @@ class HermesLoop:
     def _maybe_threshold_compact(self, messages, prompt_tokens):
         if not self.compaction.get("enabled", True):
             return messages, []
+        # Gap 1: PreCompact sebelum pemampatan, PostCompact sesudahnya.
+        ctx = self._hook_ctx_base()
+        fire_pre_compact(self.hooks, ctx)
         out, actions = apply_threshold_pipeline(
             messages,
             prompt_tokens,
@@ -380,7 +551,25 @@ class HermesLoop:
             prefix_len=int(self.compaction["prefix_len"]),
             summarizer=self._summarize_for_compaction,
         )
+        fire_post_compact(self.hooks, ctx, {"compact_actions": actions})
         return out, actions
+
+    # -- task tracking (Gap 2) ----------------------------------------
+
+    def _tasks_block(self):
+        """Blok "## Daftar task" untuk system prompt. Kosong bila tak ada.
+
+        Disuntik ulang SETIAP turn sebelum panggilan model agar state task
+        survive compaction: system prompt masuk prefix_len yang tidak
+        pernah disentuh pipeline compaction (lihat hermes/tasks.py).
+        """
+        if not self.tasks:
+            return ""
+        summary = self.tasks.summary(
+            max_chars=int(self.tasks_cfg["summary_max_chars"]))
+        if not summary:
+            return ""
+        return "\n\n## Daftar task\n" + summary
 
     # -- memory (Fase 2) --------------------------------------------------
 
@@ -445,6 +634,9 @@ class HermesLoop:
                 "Jangan memanggil atau memintanya; gunakan read_file, "
                 "list_dir, grep, dan remember."
             )
+        # Gap 2: basis system prompt statis; blok task disuntik segar tiap
+        # turn (lihat _tasks_block) agar survive compaction.
+        base_system_prompt = system_prompt
         messages = [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": self.task},
@@ -463,6 +655,7 @@ class HermesLoop:
         step = 0
         while step < self.max_steps:
             step += 1
+            self._step = step  # hook ctx selalu tahu step berjalan
             if step > 1:
                 time.sleep(MODEL_CALL_DELAY_S)
             print(
@@ -471,6 +664,9 @@ class HermesLoop:
             )
             # Lapis 1: microcompaction tiap turn SEBELUM request (tanpa LLM)
             messages = self._maybe_micro_compact(messages)
+            # Gap 2: suntik ringkasan task segar ke system prompt tiap turn.
+            # System prompt masuk prefix compaction -> tidak pernah dipotong.
+            messages[0]["content"] = base_system_prompt + self._tasks_block()
             try:
                 msg, usage = call_model(messages, self.model, self.api_key,
                                         tools=self.tool_schemas)
@@ -482,13 +678,35 @@ class HermesLoop:
                     "progress.json — lanjutkan manual bila kuota pulih.",
                     "rate_limited",
                 )
+                self._fire_on_stop("rate_limited", str(e))
+                self._finish_accounting()    # Gap 3
                 print(f"[hermes] {e}", flush=True)
                 return 0
             except Exception as e:
                 prog.update(step=step, status="error", note=str(e)[:300])
                 self._write_progress(prog)
+                self._fire_on_error(e)       # Gap 1: OnError
+                self._fire_on_stop("error", str(e)[:300])
+                self._finish_accounting()    # Gap 3: usage.json + ringkasan
                 print(f"[hermes] ERROR: {e}", flush=True)
                 return 1
+
+            # Gap 3 — akuntansi tiap selesai call_model; stop rapi bila
+            # run_cost_cap tercapai (status cost_capped, return 0).
+            if self._accounting_after_call(usage, messages, step):
+                note = self.acct.cap_message()
+                prog.update(step=step, status="cost_capped", note=note)
+                self._write_progress(prog)
+                self._write_out(
+                    "BERHENTI RAPI: " + note + "\n\n"
+                    "Progress tersimpan di progress.json; rincian token di "
+                    "usage.json. Naikkan accounting.run_cost_cap di config "
+                    "untuk melanjutkan.",
+                    "cost_capped",
+                )
+                self._fire_on_stop("cost_capped", note)
+                self._finish_accounting()
+                return 0
 
             assistant_msg = {"role": "assistant", "content": msg.get("content")}
             if msg.get("tool_calls"):
@@ -519,14 +737,9 @@ class HermesLoop:
                         args = json.loads(fn.get("arguments") or "{}")
                     except Exception:
                         args = {}
-                    if name not in self.dispatch:
-                        result = f"tool tidak dikenal: {name}"
-                    else:
-                        print(
-                            f"[hermes]   tool: {name} {str(args)[:120]}",
-                            flush=True,
-                        )
-                        _allowed, result = self._gated_tool(name, args)
+                    # Gap 1: jalur penuh tool lewat _dispatch_tool
+                    # (PreToolUse -> permission gate -> exec -> PostToolUse).
+                    result = self._dispatch_tool(name, args)
                     messages.append(
                         {
                             "role": "tool",
@@ -536,6 +749,9 @@ class HermesLoop:
                         }
                     )
                     prog["last_tool"] = name
+                self._last_tool = prog.get("last_tool")
+                if self._qc_flags:
+                    prog["qc_flags"] = list(self._qc_flags)
                 prog.update(step=step, status="running")
                 self._write_progress(prog)
                 continue
@@ -545,13 +761,16 @@ class HermesLoop:
             if fb:
                 name, args = fb
                 print(f"[hermes]   tool (fallback): {name}", flush=True)
-                _allowed, result = self._gated_tool(name, args)
+                result = self._dispatch_tool(name, args)
                 messages.append(
                     {
                         "role": "user",
                         "content": f"[hasil tool {name}]\n{result}\nLanjutkan task.",
                     }
                 )
+                self._last_tool = name
+                if self._qc_flags:
+                    prog["qc_flags"] = list(self._qc_flags)
                 prog.update(step=step, status="running", last_tool=name)
                 self._write_progress(prog)
                 continue
@@ -560,6 +779,8 @@ class HermesLoop:
             prog.update(step=step, status="done")
             self._write_progress(prog)
             self._write_out(content, "done")
+            self._fire_on_stop("done")
+            self._finish_accounting()    # Gap 3: usage.json + ringkasan
             print(f"[hermes] selesai di step {step}. OUT.md ditulis.", flush=True)
             return 0
 
@@ -573,6 +794,9 @@ class HermesLoop:
             "Lihat progress.json untuk status terakhir.",
             "max_steps",
         )
+        self._fire_on_stop("max_steps",
+                           f"max-steps ({self.max_steps}) tercapai")
+        self._finish_accounting()    # Gap 3: usage.json + ringkasan
         print("[hermes] max-steps tercapai.", flush=True)
         return 0
 
@@ -687,6 +911,9 @@ def main(argv=None) -> int:
         memory_cfg=memory_cfg or None,
         permissions_cfg=cfg.get("permissions"),
         no_exec=args.no_exec,
+        hooks_cfg=cfg.get("hooks"),  # Gap 1: blok `hooks:` di YAML
+        tasks_cfg=cfg.get("tasks"),  # Gap 2: blok `tasks:` di YAML
+        accounting_cfg=cfg.get("accounting"),  # Gap 3: blok `accounting:`
     )
     return loop.run()
 

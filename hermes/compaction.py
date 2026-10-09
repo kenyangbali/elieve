@@ -47,6 +47,13 @@ DEFAULT_MAX_AGE_HOURS = 24
 
 FORBIDDEN_PREFIXES = ("bns/", "oc/")   # kuota terlarang — ditolak di kode
 
+# Gap 2 — tool hasil yang membawa STATE (bukan sekadar observasi).
+# Pesan tool dengan nama ini dikecualikan dari pemotongan micro_compact
+# maupun masking observasi: state task harus survive compaction.
+# Ground truth tetap tasks.json; ringkasan segar disuntik tiap turn ke
+# system prompt oleh HermesLoop ("## Daftar task"). Lihat hermes/tasks.py.
+STATEFUL_TOOL_NAMES = frozenset({"task_update"})
+
 CHARS_PER_TOKEN = 4             # heuristik estimasi bila usage tak tersedia
 
 
@@ -183,6 +190,9 @@ def micro_compact(messages, recency_window=DEFAULT_RECENCY_WINDOW,
             continue
         if m.get("tool_call_id") in active_ids:
             continue
+        # Gap 2: hasil tool pembawa state task tidak boleh dipotong.
+        if m.get("name") in STATEFUL_TOOL_NAMES:
+            continue
         content = m.get("content") or ""
         if len(content) > max_tool_chars:
             out[gi] = dict(m, content=OFFLOADED_FMT.format(
@@ -217,6 +227,9 @@ def mask_observations(messages, recency_window=DEFAULT_RECENCY_WINDOW,
         if m.get("role") != "tool":
             continue
         if m.get("tool_call_id") in active_ids:
+            continue
+        # Gap 2: hasil tool pembawa state task tidak boleh di-mask.
+        if m.get("name") in STATEFUL_TOOL_NAMES:
             continue
         if m.get("content") != marker:
             out[gi] = dict(m, content=marker)
@@ -468,3 +481,33 @@ class ContextCompactor:
             recency_window=self.recency_window,
             prefix_len=self.prefix_len,
             summarizer=summarizer)
+
+
+# -- integrasi hook lifecycle (Gap 1, docs/GAP-AUDIT.md G1) -----------
+# Fungsi-fungsi di atas MESTI murni (tanpa efek samping) agar bisa
+# di-test deterministik; hook PreCompact/PostCompact difire dari loop di
+# sekitar pemanggilan pipeline, via helper di bawah (None-safe).
+
+def fire_pre_compact(runner, ctx):
+    """Fire hook PreCompact sebelum pemampatan. runner=None -> no-op."""
+    if runner is None:
+        return {}
+    try:
+        return runner.pre_compact(ctx or {})
+    except Exception as e:
+        log.warning("PreCompact gagal (run lanjut): %s", e)
+        return {"error": str(e)}
+
+
+def fire_post_compact(runner, ctx, info=None):
+    """Fire hook PostCompact sesudah pemampatan. runner=None -> no-op."""
+    if runner is None:
+        return {}
+    try:
+        merged = dict(ctx or {})
+        if info:
+            merged.update(info)
+        return runner.post_compact(merged)
+    except Exception as e:
+        log.warning("PostCompact gagal (run lanjut): %s", e)
+        return {"error": str(e)}
