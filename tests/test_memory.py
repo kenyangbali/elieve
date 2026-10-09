@@ -196,7 +196,7 @@ class TestLoopIntegration(unittest.TestCase):
 
         captured = {}
 
-        def fake_call(messages, model, api_key):
+        def fake_call(messages, model, api_key, tools=None):
             captured["system"] = messages[0]["content"]
             return ({"content": "TIDAK ADA TEMUAN", "tool_calls": None},
                     {"prompt_tokens": 50})
@@ -214,7 +214,7 @@ class TestLoopIntegration(unittest.TestCase):
         loop = self._make_loop(d)
         captured = {}
 
-        def fake_call(messages, model, api_key):
+        def fake_call(messages, model, api_key, tools=None):
             captured["system"] = messages[0]["content"]
             return ({"content": "TIDAK ADA TEMUAN", "tool_calls": None}, {})
 

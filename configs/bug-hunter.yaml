@@ -60,3 +60,21 @@ permissions:
   kilat_max_tokens: 32        # verdict kilat <64 token
   kilat_timeout_s: 10         # timeout singkat tahap 1
   max_consecutive_failures: 3 # auto-disable classifier setelah N gagal beruntun
+
+# Fase 4 — multi-agent orchestration (docs/ARCHITECTURE.md §4).
+# OPSIONAL & PLUGGABLE ("by choose", keputusan Bayu 2026-10-09):
+#   - orchestrator_model KOSONG atau enabled=false -> 100% single-agent (default lama)
+#   - orchestrator_model DIISI -> task dipecah mandor, worker paralel di-spawn
+#   - mandor MATI (timeout/error) -> fallback single-agent + warning (run tidak crash)
+# API key custom HANYA via env var (orchestrator_api_key_env = NAMA env var).
+orchestrator:
+  enabled: true
+  orchestrator_model: ""       # mis. ag/gemini-3-flash ; kosong = OFF (single-agent)
+  orchestrator_api_base: ""    # kosong = 9router lokal; isi URL OpenAI-compatible custom
+  orchestrator_api_key_env: "" # NAMA env var berisi key custom (tak pernah di-hardcode)
+  worker_model: ""             # kosong = pakai model utama
+  max_workers: 4               # batas worker paralel (depth maks 1, anti fork-bomb)
+  worker_max_steps: 20         # budget step tiap worker
+  worker_readonly_default: false  # default toolset worker (bisa di-override mandor per subtask)
+  plan_timeout_s: 120          # timeout planning mandor
+  worker_timeout_s: 1800       # timeout tiap worker subprocess

@@ -170,16 +170,18 @@ def _post_json(url, headers, payload, timeout):
             return e.code, e.read().decode("utf-8", "replace")
 
 
-def call_model(messages, model, api_key):
+def call_model(messages, model, api_key, tools=None):
     """Kirim chat completion; kembalikan (message, usage).
 
     `usage` berisi prompt_tokens/completion_tokens bila provider
     memberikannya, else dict kosong (pemanggil pakai estimasi chars/4).
+    `tools`: daftar schema function-call; default TOOL_SCHEMAS global
+    (worker read-only meneruskan subset tanpa `exec`).
     """
     payload = {
         "model": model,
         "messages": messages,
-        "tools": TOOL_SCHEMAS,
+        "tools": TOOL_SCHEMAS if tools is None else tools,
         "tool_choice": "auto",
         "stream": False,
     }
@@ -202,9 +204,12 @@ def call_model(messages, model, api_key):
         raise RuntimeError(f"respon 9router tidak bisa di-parse: {e} :: {text[:300]}")
 
 
-def _fallback_tool_call(text: str):
+def _fallback_tool_call(text: str, dispatch=None):
     """Cadangan bila model tidak pakai native function calling:
-    blok ```tool {"name": ..., "arguments": {...}}```"""
+    blok ```tool {"name": ..., "arguments": {...}}```
+
+    `dispatch`: mapping tool yang diizinkan (default DISPATCH global;
+    worker read-only meneruskan subset tanpa `exec`)."""
     m = re.search(r"```tool\s*\n(\{.*?\})\s*```", text, re.S)
     if not m:
         return None
@@ -213,7 +218,8 @@ def _fallback_tool_call(text: str):
     except Exception:
         return None
     name = d.get("name")
-    if name in DISPATCH:
+    allowed = DISPATCH if dispatch is None else dispatch
+    if name in allowed:
         return name, d.get("arguments") or {}
     return None
 
@@ -223,13 +229,22 @@ class HermesLoop:
 
     def __init__(self, task, outdir, model=DEFAULT_MODEL, max_steps=40,
                  system_prompt=SYSTEM_PROMPT, compaction_cfg=None,
-                 memory_cfg=None, permissions_cfg=None):
+                 memory_cfg=None, permissions_cfg=None, no_exec=False):
         self.task = task
         self.outdir = outdir
         self.model = validate_model(model)
         self.max_steps = max_steps
         self.system_prompt = system_prompt
         self.api_key = get_api_key()
+        # Toolset per-run (Fase 4): worker read-only membuang `exec`.
+        self.no_exec = bool(no_exec)
+        self.dispatch = dict(DISPATCH)
+        if self.no_exec:
+            self.dispatch.pop("exec", None)
+        self.tool_schemas = [
+            s for s in TOOL_SCHEMAS
+            if s.get("function", {}).get("name") in self.dispatch
+        ]
         # Konfigurasi compaction (Fase 1); default aman bila config tak ada.
         self.compaction = {
             "enabled": True,
@@ -304,7 +319,7 @@ class HermesLoop:
 
     def _run_tool(self, name, args):
         try:
-            return str(DISPATCH[name](**args))
+            return str(self.dispatch[name](**args))
         except TypeError as e:
             return f"argumen salah untuk {name}: {e}"
         except ToolError as e:
@@ -423,6 +438,13 @@ class HermesLoop:
         system_prompt = self.system_prompt
         if recalled:
             system_prompt += "\n\n## Ingatan sesi lalu\n" + recalled
+        if self.no_exec:
+            # Fase 4: worker read-only — model wajib tahu exec tak tersedia.
+            system_prompt += (
+                "\n\nMODE BACA-SAJA: tool `exec` TIDAK tersedia di sesi ini. "
+                "Jangan memanggil atau memintanya; gunakan read_file, "
+                "list_dir, grep, dan remember."
+            )
         messages = [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": self.task},
@@ -450,7 +472,8 @@ class HermesLoop:
             # Lapis 1: microcompaction tiap turn SEBELUM request (tanpa LLM)
             messages = self._maybe_micro_compact(messages)
             try:
-                msg, usage = call_model(messages, self.model, self.api_key)
+                msg, usage = call_model(messages, self.model, self.api_key,
+                                        tools=self.tool_schemas)
             except RateLimited as e:
                 prog.update(step=step, status="rate_limited", note=str(e))
                 self._write_progress(prog)
@@ -496,7 +519,7 @@ class HermesLoop:
                         args = json.loads(fn.get("arguments") or "{}")
                     except Exception:
                         args = {}
-                    if name not in DISPATCH:
+                    if name not in self.dispatch:
                         result = f"tool tidak dikenal: {name}"
                     else:
                         print(
@@ -518,7 +541,7 @@ class HermesLoop:
                 continue
 
             content = msg.get("content") or ""
-            fb = _fallback_tool_call(content)
+            fb = _fallback_tool_call(content, self.dispatch)
             if fb:
                 name, args = fb
                 print(f"[hermes]   tool (fallback): {name}", flush=True)
@@ -585,10 +608,56 @@ def main(argv=None) -> int:
         help="rapikan MEMORY.md di --outdir via autoDream lalu keluar "
              "(tanpa menjalankan task).",
     )
+    ap.add_argument(
+        "--no-exec",
+        action="store_true",
+        help="mode baca-saja: tool `exec` dibuang dari toolset run ini "
+             "(dipakai worker orchestrator).",
+    )
     args = ap.parse_args(argv)
 
     cfg = load_config(args.config) if args.config else {}
     memory_cfg = cfg.get("memory") or {}
+
+    # Fase 4 — orchestrator (OPSIONAL, "by choose", keputusan Bayu 2026-10-09):
+    # aktif hanya bila enabled + orchestrator_model terisi. Model kosong /
+    # enabled=false -> 100% single-agent seperti sebelumnya.
+    orch_cfg = cfg.get("orchestrator") or {}
+    orch_wanted = bool(orch_cfg.get("enabled", True)) and bool(
+        (orch_cfg.get("orchestrator_model") or "").strip()
+    )
+    if orch_wanted:
+        if os.environ.get("_HERMES_WORKER") == "1":
+            sys.stderr.write(
+                "ERROR: depth guard — worker dilarang menjalankan "
+                "orchestrator.\n"
+            )
+            return 2
+        # Lazy import agar tidak circular (orchestrator tidak import loop).
+        from .orchestrator import Orchestrator, OrchestratorError
+        try:
+            orch = Orchestrator.from_config(
+                orch_cfg,
+                task=args.task,
+                outdir=args.outdir,
+                model=cfg.get("model", args.model),
+                api_key=get_api_key(),
+                compaction_cfg=cfg.get("compaction"),
+                memory_cfg=memory_cfg or None,
+                permissions_cfg=cfg.get("permissions"),
+                system_prompt=args.system_prompt
+                or cfg.get("system_prompt"),
+            )
+            orch.run(args.task, args.outdir)
+            return 0
+        except OrchestratorError as e:
+            # Mandor mati / plan gagal / depth guard: fallback single-agent,
+            # run tidak boleh crash karenanya.
+            print(
+                f"[hermes] orchestrator gagal ({e}) — "
+                f"fallback ke single-agent.",
+                flush=True,
+            )
 
     if args.tidy:
         os.makedirs(args.outdir, exist_ok=True)
@@ -617,6 +686,7 @@ def main(argv=None) -> int:
         compaction_cfg=cfg.get("compaction"),
         memory_cfg=memory_cfg or None,
         permissions_cfg=cfg.get("permissions"),
+        no_exec=args.no_exec,
     )
     return loop.run()
 
