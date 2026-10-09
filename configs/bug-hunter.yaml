@@ -26,3 +26,14 @@ system_prompt: null
 
 # Rate limit sopan antar panggilan model (detik).
 model_call_delay_s: 3
+
+# Fase 1 — context compaction (docs/PHASE1-COMPACTION.md).
+compaction:
+  enabled: true
+  context_limit: 64000        # batas sebelum pipeline threshold agresif
+  recency_window: 5           # turn terakhir yang tidak disentuh compaction
+  micro_max_tool_chars: 2000  # hasil tool lebih panjang dari ini dipotong
+  thresholds: [70, 80, 85, 90, 95]  # persen dari context_limit
+  summarizer_model: ag/gemini-3-flash  # murah; bns/*/oc/* DITOLAK di kode
+  full_compact_keep_recent: 5 # turn terakhir verbatim setelah full compact
+  prefix_len: 2               # system + task awal: TIDAK PERNAH diubah

@@ -29,6 +29,19 @@ import time
 from datetime import datetime, timezone
 
 from .tools import DISPATCH, TOOL_SCHEMAS, ToolError
+from .compaction import (
+    DEFAULT_CONTEXT_LIMIT,
+    DEFAULT_KEEP_RECENT,
+    DEFAULT_MAX_TOOL_CHARS,
+    DEFAULT_PREFIX_LEN,
+    DEFAULT_RECENCY_WINDOW,
+    DEFAULT_SUMMARIZER_MODEL,
+    DEFAULT_THRESHOLDS,
+    apply_threshold_pipeline,
+    estimate_tokens,
+    full_compact,
+    micro_compact,
+)
 
 API_URL = "http://127.0.0.1:20128/v1/chat/completions"
 DB_PATH = os.path.expanduser("~/.9router/db/data.sqlite")
@@ -89,6 +102,24 @@ def validate_model(model: str) -> str:
     return model.strip()
 
 
+def _validate_compaction_model(model: str) -> str:
+    """Summarizer compaction HANYA boleh ag/*. bns/*/oc/* DITOLAK."""
+    low = (model or "").strip().lower()
+    for prefix in FORBIDDEN_PREFIXES:
+        if low.startswith(prefix):
+            sys.stderr.write(
+                f"ERROR: summarizer '{model}' DILARANG — jangan sentuh "
+                f"kuota bns/* atau oc/*.\n"
+            )
+            sys.exit(2)
+    if not low.startswith("ag/"):
+        sys.stderr.write(
+            f"ERROR: summarizer harus model ag/* (dapat '{model}').\n"
+        )
+        sys.exit(2)
+    return model.strip()
+
+
 def get_api_key(db_path: str = DB_PATH) -> str:
     try:
         con = sqlite3.connect(db_path)
@@ -131,6 +162,11 @@ def _post_json(url, headers, payload, timeout):
 
 
 def call_model(messages, model, api_key):
+    """Kirim chat completion; kembalikan (message, usage).
+
+    `usage` berisi prompt_tokens/completion_tokens bila provider
+    memberikannya, else dict kosong (pemanggil pakai estimasi chars/4).
+    """
     payload = {
         "model": model,
         "messages": messages,
@@ -150,7 +186,9 @@ def call_model(messages, model, api_key):
         raise RuntimeError(f"9router HTTP {status}: {text[:500]}")
     try:
         data = json.loads(text)
-        return data["choices"][0]["message"]
+        message = data["choices"][0]["message"]
+        usage = data.get("usage") or {}
+        return message, usage
     except Exception as e:
         raise RuntimeError(f"respon 9router tidak bisa di-parse: {e} :: {text[:300]}")
 
@@ -175,13 +213,28 @@ class HermesLoop:
     """Satu sesi ReAct: kirim task, iterasi tool call sampai jawaban akhir."""
 
     def __init__(self, task, outdir, model=DEFAULT_MODEL, max_steps=40,
-                 system_prompt=SYSTEM_PROMPT):
+                 system_prompt=SYSTEM_PROMPT, compaction_cfg=None):
         self.task = task
         self.outdir = outdir
         self.model = validate_model(model)
         self.max_steps = max_steps
         self.system_prompt = system_prompt
         self.api_key = get_api_key()
+        # Konfigurasi compaction (Fase 1); default aman bila config tak ada.
+        self.compaction = {
+            "enabled": True,
+            "context_limit": DEFAULT_CONTEXT_LIMIT,
+            "recency_window": DEFAULT_RECENCY_WINDOW,
+            "micro_max_tool_chars": DEFAULT_MAX_TOOL_CHARS,
+            "thresholds": list(DEFAULT_THRESHOLDS),
+            "summarizer_model": DEFAULT_SUMMARIZER_MODEL,
+            "full_compact_keep_recent": DEFAULT_KEEP_RECENT,
+            "prefix_len": DEFAULT_PREFIX_LEN,
+        }
+        if compaction_cfg:
+            self.compaction.update(compaction_cfg)
+        # validasi awal: summarizer wajib ag/* (bns/*/oc/* ditolak di kode)
+        _validate_compaction_model(self.compaction["summarizer_model"])
         if self.model not in ALLOWED_MODELS:
             print(
                 f"[hermes] peringatan: '{self.model}' bukan daftar dikenal; "
@@ -219,6 +272,42 @@ class HermesLoop:
         except Exception as e:
             return f"tool error ({name}): {e}"
 
+    # -- compaction (Fase 1) ------------------------------------------
+
+    def _summarize_for_compaction(self, messages):
+        """Summarizer untuk pipeline 95%: full_compact via model murah ag/*."""
+        return full_compact(
+            messages,
+            model=self.compaction["summarizer_model"],
+            api_key=self.api_key,
+            keep_recent=int(self.compaction["full_compact_keep_recent"]),
+            prefix_len=int(self.compaction["prefix_len"]),
+        )
+
+    def _maybe_micro_compact(self, messages):
+        if not self.compaction.get("enabled", True):
+            return messages
+        return micro_compact(
+            messages,
+            recency_window=int(self.compaction["recency_window"]),
+            max_tool_chars=int(self.compaction["micro_max_tool_chars"]),
+            prefix_len=int(self.compaction["prefix_len"]),
+        )
+
+    def _maybe_threshold_compact(self, messages, prompt_tokens):
+        if not self.compaction.get("enabled", True):
+            return messages, []
+        out, actions = apply_threshold_pipeline(
+            messages,
+            prompt_tokens,
+            context_limit=int(self.compaction["context_limit"]),
+            thresholds=self.compaction["thresholds"],
+            recency_window=int(self.compaction["recency_window"]),
+            prefix_len=int(self.compaction["prefix_len"]),
+            summarizer=self._summarize_for_compaction,
+        )
+        return out, actions
+
     # -- main --------------------------------------------------------
 
     def run(self) -> int:
@@ -247,8 +336,10 @@ class HermesLoop:
                 f"[hermes] step {step}/{self.max_steps} -> {self.model} ...",
                 flush=True,
             )
+            # Lapis 1: microcompaction tiap turn SEBELUM request (tanpa LLM)
+            messages = self._maybe_micro_compact(messages)
             try:
-                msg = call_model(messages, self.model, self.api_key)
+                msg, usage = call_model(messages, self.model, self.api_key)
             except RateLimited as e:
                 prog.update(step=step, status="rate_limited", note=str(e))
                 self._write_progress(prog)
@@ -268,6 +359,21 @@ class HermesLoop:
             assistant_msg = {"role": "assistant", "content": msg.get("content")}
             if msg.get("tool_calls"):
                 assistant_msg["tool_calls"] = msg["tool_calls"]
+            # Lapis 2/3: pipeline threshold berdasar prompt_tokens respons.
+            # Bila usage tak tersedia, estimasi dari request yang baru dikirim.
+            prompt_tokens = (usage or {}).get("prompt_tokens")
+            if not prompt_tokens:
+                prompt_tokens = estimate_tokens(messages)
+            messages, compact_actions = self._maybe_threshold_compact(
+                messages, prompt_tokens
+            )
+            for act in compact_actions:
+                print(
+                    f"[hermes] compaction: {act} "
+                    f"(prompt_tokens~{prompt_tokens})",
+                    flush=True,
+                )
+            prog["compaction_actions"] = compact_actions
             messages.append(assistant_msg)
 
             tool_calls = msg.get("tool_calls") or []
@@ -371,6 +477,7 @@ def main(argv=None) -> int:
         model=cfg.get("model", args.model),
         max_steps=int(cfg.get("max_steps", args.max_steps)),
         system_prompt=args.system_prompt or cfg.get("system_prompt", SYSTEM_PROMPT),
+        compaction_cfg=cfg.get("compaction"),
     )
     return loop.run()
 

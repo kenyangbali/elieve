@@ -95,3 +95,10 @@ compaction:
 - + cache preservation: total ~76% (data Anthropic)
 - Untuk operasi bounty (ratusan request/hari via ag/*): penghematan signifikan
   dari kuota 5-jam + mingguan tiap akun
+
+> Catatan: angka di atas adalah data sekunder dari sumber eksternal, BUKAN
+> hasil benchmark Hermes. Hasil **simulasi lokal** (heuristik chars/4,
+> `tests/test_compaction.py::TestSimulation40Turn`, sesi sintetis 40-turn
+> dengan output tool ~5000 chars/turn): tanpa compaction ~52.083 token vs
+> dengan micro_compact per-turn ~9.278 token (17,8% dari awal, hemat 82,2%).
+> Ini simulasi, bukan pengukuran produksi.
