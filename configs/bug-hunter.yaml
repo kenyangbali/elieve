@@ -1,0 +1,28 @@
+# Profil bug-hunter — dipakai via: python3 -m hermes.loop --config configs/bug-hunter.yaml --task "..." --outdir ...
+# Nilai di sini menjadi default; flag CLI (--model, --max-steps) menimpa bila diisi.
+
+model: ag/claude-opus-4-6-thinking   # audit berat (default)
+# Alternatif: ag/gemini-3.1-pro (kuat), ag/gemini-3-flash (ringan/cepat)
+# DILARANG: bns/* dan oc/* (kuota terlarang — ditolak di kode)
+
+max_steps: 40
+
+# Tool yang boleh dipakai profil ini (subset dari hermes/tools).
+tools:
+  - read_file
+  - list_dir
+  - grep
+  - exec
+
+# Batas sandbox exec (dipaksa di kode, tulis di sini sbg dokumentasi).
+sandbox:
+  allowed_roots:
+    - /home/hatch/workspace
+    - /tmp
+  exec_cwd: /home/hatch/workspace
+
+# System prompt profil ini. Kosongkan (= null) untuk memakai default bawaan loop.py.
+system_prompt: null
+
+# Rate limit sopan antar panggilan model (detik).
+model_call_delay_s: 3

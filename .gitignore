@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Run outputs (per-task, jangan di-commit)
+runs/
+*.log
+
+# Secrets — JANGAN PERNAH commit
+.env
+*key*.json
+*secret*
+*credential*
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
