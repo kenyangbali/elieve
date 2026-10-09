@@ -1,6 +1,6 @@
-"""Unit test dasar untuk hermes/tools. Jalan tanpa 9router / API key.
+"""Unit test dasar untuk elieve/tools. Jalan tanpa 9router / API key.
 
-    cd ~/workspace/hermes-agent && python3 -m unittest discover -s tests
+    cd ~/workspace/elieve && python3 -m unittest discover -s tests
 """
 
 import os
@@ -10,7 +10,7 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from hermes.tools import (  # noqa: E402
+from elieve.tools import (  # noqa: E402
     DISPATCH,
     TOOL_SCHEMAS,
     ToolError,
@@ -18,8 +18,8 @@ from hermes.tools import (  # noqa: E402
     list_dir,
     read_file,
 )
-from hermes.tools.exec import _exec_allowed  # noqa: E402
-from hermes.tools.exec import exec as run_exec  # noqa: E402
+from elieve.tools.exec import _exec_allowed  # noqa: E402
+from elieve.tools.exec import exec as run_exec  # noqa: E402
 
 
 class TestReadTools(unittest.TestCase):
@@ -64,12 +64,12 @@ class TestExecTool(unittest.TestCase):
     def setUp(self):
         # run_exec shells out with cwd=workspace root; point it at /tmp
         # (always exists) and restore afterwards.
-        from hermes import tools as _tools
+        from elieve import tools as _tools
         self._prev_root = _tools.get_workspace_root()
         _tools.configure_roots("/tmp")
 
     def tearDown(self):
-        from hermes import tools as _tools
+        from elieve import tools as _tools
         _tools.configure_roots(self._prev_root)
 
     def test_deny_rm_root(self):
@@ -89,8 +89,8 @@ class TestExecTool(unittest.TestCase):
         self.assertTrue(ok)
 
     def test_exec_echo_runs(self):
-        out = run_exec("echo hello-hermes")
-        self.assertIn("hello-hermes", out)
+        out = run_exec("echo hello-elieve")
+        self.assertIn("hello-elieve", out)
 
     def test_exec_deny_raises(self):
         with self.assertRaises(ToolError):

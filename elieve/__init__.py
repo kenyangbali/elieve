@@ -1,4 +1,4 @@
-"""hermes-agent — modular AI agent framework.
+"""elieve — modular AI agent framework.
 
 Baseline v1: a ReAct loop with function calling. The advanced architecture
 patterns (compaction, memory, permission classifier, orchestrator) are
@@ -9,13 +9,13 @@ __version__ = "0.1.0"
 
 
 def __getattr__(name):
-    # Lazy import so `python3 -m hermes.loop` does not trigger a
+    # Lazy import so `python3 -m elieve.loop` does not trigger a
     # double-module RuntimeWarning when the package __init__ runs.
-    if name == "HermesLoop":
-        from .loop import HermesLoop
+    if name == "ElieveLoop":
+        from .loop import ElieveLoop
 
-        return HermesLoop
-    raise AttributeError(f"module 'hermes' has no attribute {name!r}")
+        return ElieveLoop
+    raise AttributeError(f"module 'elieve' has no attribute {name!r}")
 
 
-__all__ = ["HermesLoop", "__version__"]
+__all__ = ["ElieveLoop", "__version__"]

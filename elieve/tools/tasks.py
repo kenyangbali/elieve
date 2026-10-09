@@ -4,7 +4,7 @@ Tool ini butuh TaskList yang di-bind oleh loop utama sebelum run
 (`bind_tasks`). Tanpa binding, tool menolak (ToolError) agar agent
 mendapat umpan balik yang jelas, bukan crash diam-diam.
 
-Pola persis mengikuti hermes/tools/memory.py (bind/unbind per-run).
+Pola persis mengikuti elieve/tools/memory.py (bind/unbind per-run).
 """
 
 from . import ToolError
@@ -32,7 +32,7 @@ def task_update(action, title=None, status=None) -> str:
     action="list":  tampilkan seluruh daftar.
 
     Hasil tool ini dikecualikan dari pemotongan micro_compact
-    (hermes/compaction.py STATEFUL_TOOL_NAMES) agar state task survive.
+    (elieve/compaction.py STATEFUL_TOOL_NAMES) agar state task survive.
     """
     if _TASKS is None:
         raise ToolError("daftar task belum di-bind ke run ini (hubungi operator).")

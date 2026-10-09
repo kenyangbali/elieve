@@ -3,7 +3,7 @@ requires = ["setuptools>=61"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "hermes-agent"
+name = "elieve"
 version = "0.1.0"
 description = "Modular AI agent framework — ReAct loop with sandboxed tools, context compaction, cross-session memory, permission gates, and multi-agent orchestration."
 readme = "README.md"
@@ -18,8 +18,8 @@ classifiers = [
 ]
 
 [project.scripts]
-hermes = "hermes.loop:main"
+elieve = "elieve.loop:main"
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["hermes*"]
+include = ["elieve*"]

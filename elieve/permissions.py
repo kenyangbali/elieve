@@ -1,6 +1,6 @@
 """Phase 3 — permission gate: layer-0 regex + 2-stage classifier (full implementation).
 
-Problem: the v1 deny-list regex (hermes/tools/exec.py: DENY_RULES) does not
+Problem: the v1 deny-list regex (elieve/tools/exec.py: DENY_RULES) does not
 understand context and is fragile against spelling variations. Semantic
 judgement is needed.
 
@@ -36,7 +36,7 @@ from datetime import datetime, timezone
 from .tools.exec import _exec_allowed
 from .providers import ProviderConfig, check_model_allowed
 
-log = logging.getLogger("hermes.permissions")
+log = logging.getLogger("elieve.permissions")
 
 DEFAULT_KILAT_MAX_TOKENS = 32          # must be <64
 DEFAULT_KILAT_TIMEOUT_S = 10
@@ -318,7 +318,7 @@ class PermissionGate:
                 msg = ("permission gate: classifier OFF "
                        "(model kosong / dinonaktifkan / auto-disable) — "
                        "hanya regex lapisan-0 yang aktif.")
-                print(f"[hermes] {msg}", file=sys.stderr, flush=True)
+                print(f"[elieve] {msg}", file=sys.stderr, flush=True)
                 log.warning(msg)
             audit["verdict"] = "allow"
             audit["reason"] = "classifier off — lapisan-0 lolos"
@@ -378,5 +378,5 @@ class PermissionGate:
             msg = (f"permission gate: classifier AUTO-DISABLE setelah "
                    f"{self._consec_failures} gagal beruntun — sisa run "
                    f"hanya pakai regex lapisan-0.")
-            print(f"[hermes] {msg}", file=sys.stderr, flush=True)
+            print(f"[elieve] {msg}", file=sys.stderr, flush=True)
             log.warning(msg)

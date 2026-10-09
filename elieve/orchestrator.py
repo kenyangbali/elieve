@@ -2,7 +2,7 @@
 
 Problem solved: one agent for a large audit is slow and tunnel-visioned.
 The orchestrator splits a task into independent subtasks, then runs N
-HermesLoop workers in parallel (isolated subprocesses).
+ElieveLoop workers in parallel (isolated subprocesses).
 
 Design (see docs/ARCHITECTURE.md §4):
   - OPTIONAL & PLUGGABLE ("by choose"): the user freely picks the model
@@ -18,7 +18,7 @@ Design (see docs/ARCHITECTURE.md §4):
     hardcoded allow/forbid lists here.
 
 Security:
-  - Depth guard: workers (env _HERMES_WORKER=1) may NOT run the
+  - Depth guard: workers (env _ELIEVE_WORKER=1) may NOT run the
     orchestrator -> OrchestratorError. Prevents recursive explosions.
   - Every worker: its own outdir, its own max_steps, a limited toolset
     (--no-exec flag for read-only mode), its own progress.json.
@@ -36,6 +36,7 @@ import concurrent.futures
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -47,7 +48,7 @@ from .providers import (
     post_chat_completions,
 )
 
-WORKER_ENV_FLAG = "_HERMES_WORKER"
+WORKER_ENV_FLAG = "_ELIEVE_WORKER"
 
 DEFAULT_MAX_WORKERS = 4
 DEFAULT_WORKER_MAX_STEPS = 20
@@ -76,7 +77,7 @@ Rules:
 class OrchestratorError(Exception):
     """Orchestrator failure (dead planner, depth guard, invalid config).
 
-    The caller (hermes.loop main) catches this and falls back to
+    The caller (elieve.loop main) catches this and falls back to
     single-agent — the run must not crash because of it.
     """
 
@@ -107,7 +108,7 @@ def _extract_json_array(text):
 
 
 class Orchestrator:
-    """Multi-worker HermesLoop coordinator (phase 4)."""
+    """Multi-worker ElieveLoop coordinator (phase 4)."""
 
     def __init__(self, orchestrator_model, provider_cfg=None,
                  model_policy=None, mandor_provider=None,
@@ -117,7 +118,8 @@ class Orchestrator:
                  plan_timeout_s=DEFAULT_PLAN_TIMEOUT_S,
                  compaction_cfg=None, memory_cfg=None, permissions_cfg=None,
                  system_prompt=None, language="en", workspace_root=None,
-                 plan_fn=None, spawn_fn=None):
+                 plan_fn=None, spawn_fn=None,
+                 plan_first=False, plan_model="", recon_plan_fn=None):
         raw = (orchestrator_model or "").strip()
         if not raw:
             raise OrchestratorError(
@@ -153,12 +155,18 @@ class Orchestrator:
         # Injectable for unit tests (no network/subprocess).
         self._plan_fn = plan_fn
         self._spawn_fn = spawn_fn
+        # Gap 6 — recon gate: plan read-only sebelum worker di-spawn.
+        # plan_first=false/absen -> perilaku lama, tanpa perubahan.
+        self.plan_first = bool(plan_first)
+        self.plan_model = (plan_model or "").strip()
+        self._recon_plan_fn = recon_plan_fn
 
     @classmethod
     def from_config(cls, orch_cfg, *, task, outdir, model, provider_cfg,
                     model_policy=None, workspace_root=None, language="en",
                     compaction_cfg=None, memory_cfg=None, permissions_cfg=None,
-                    system_prompt=None, plan_fn=None, spawn_fn=None):
+                    system_prompt=None, plan_fn=None, spawn_fn=None,
+                    recon_plan_fn=None):
         """Build from the `orchestrator:` YAML block + runtime values.
 
         The planner normally shares the main provider; an `orchestrator:`
@@ -217,6 +225,10 @@ class Orchestrator:
             workspace_root=workspace_root,
             plan_fn=plan_fn,
             spawn_fn=spawn_fn,
+            # Gap 6 — recon gate (default off: perilaku lama tanpa perubahan).
+            plan_first=bool(orch_cfg.get("plan_first", False)),
+            plan_model=(orch_cfg.get("plan_model") or "").strip(),
+            recon_plan_fn=recon_plan_fn,
         )
 
     # -- planning ----------------------------------------------------
@@ -286,6 +298,59 @@ class Orchestrator:
             )
         return cleaned
 
+    # -- recon gate (Gap 6) --------------------------------------------
+
+    def _run_recon_gate(self, task, outdir):
+        """Fase plan read-only SEBELUM worker mahal di-spawn.
+
+        Memakai mekanisme plan yang sama dengan CLI --plan
+        (elieve.planmode.run_plan): toolset tanpa exec, menulis PLAN.md.
+        Worker baru di-spawn setelah PLAN.md ada. Gagal -> OrchestratorError
+        (caller fallback ke single-agent; run tidak crash).
+
+        Returns dict info recon untuk dicatat di progress.json.
+        """
+        from .planmode import run_plan
+        recon_outdir = os.path.join(outdir, "recon-plan")
+        recon_model = None
+        plan_md = None
+        if self._recon_plan_fn is not None:
+            # Injectable untuk unit test (tanpa network).
+            plan_md = self._recon_plan_fn(task, recon_outdir)
+        else:
+            raw = (self.plan_model or self.worker_model
+                   or self.orchestrator_model)
+            try:
+                recon_model = check_model_allowed(raw, self.model_policy)
+            except ValueError as e:
+                raise OrchestratorError(
+                    f"recon gate: model plan ditolak policy: {e}")
+            print(f"[orchestrator] recon gate: plan read-only via "
+                  f"{recon_model} ...", flush=True)
+            rc = run_plan(
+                task, recon_outdir, recon_model,
+                provider_cfg=self.provider_cfg,
+                model_policy=self.model_policy,
+                lang=self.language,
+                workspace_root=self.workspace_root,
+                compaction_cfg=self.compaction_cfg,
+                memory_cfg=self.memory_cfg,
+                permissions_cfg=self.permissions_cfg,
+                system_prompt=self.system_prompt,
+            )
+            if rc == 0:
+                plan_md = os.path.join(recon_outdir, "PLAN.md")
+        if not plan_md or not os.path.isfile(plan_md):
+            raise OrchestratorError(
+                "recon gate: fase plan read-only gagal "
+                "(PLAN.md tidak ada) — worker tidak di-spawn.")
+        # Bukti gate lolos di root outdir: worker di-spawn SETELAH ini ada.
+        dest = os.path.join(outdir, "PLAN.md")
+        shutil.copy(plan_md, dest)
+        print(f"[orchestrator] recon gate lolos: {dest}", flush=True)
+        return {"outdir": recon_outdir, "plan_md": dest,
+                "model": recon_model}
+
     # -- worker spawn --------------------------------------------------
 
     def _worker_config_path(self, worker_outdir):
@@ -298,7 +363,7 @@ class Orchestrator:
             "model": self.worker_model,
             "max_steps": self.worker_max_steps,
             # Workers must not become planners (defense in depth; the
-            # primary depth guard is env _HERMES_WORKER=1).
+            # primary depth guard is env _ELIEVE_WORKER=1).
             "orchestrator": {"enabled": False, "orchestrator_model": ""},
             "provider": self.provider_cfg.to_dict(),
             "model_policy": {
@@ -332,7 +397,7 @@ class Orchestrator:
         os.makedirs(worker_outdir, exist_ok=True)
         cfg_path = self._worker_config_path(worker_outdir)
         cmd = [
-            sys.executable, "-m", "hermes.loop",
+            sys.executable, "-m", "elieve.loop",
             "--task", subtask["task"],
             "--outdir", worker_outdir,
             "--model", self.worker_model,
@@ -385,13 +450,13 @@ class Orchestrator:
         except OSError:
             return ""
 
-    def merge(self, task, results, outdir):
+    def merge(self, task, results, outdir, recon=None):
         """Merge every worker's OUT.md into one report; write OUT.md +
         progress.json in outdir. Returns the merged OUT.md path."""
         ts = datetime.now(timezone.utc).isoformat()
         ok = sum(1 for r in results if r["status"] == "done")
         lines = [
-            "# Hermes Orchestrator — merged report",
+            "# Elieve Orchestrator — merged report",
             "",
             f"- Task: {task}",
             f"- Workers: {ok}/{len(results)} succeeded",
@@ -409,8 +474,8 @@ class Orchestrator:
                 lines.append("")
             body = self._read_worker_out(r["outdir"]).strip()
             if body:
-                # Strip the worker's standard hermes header for brevity.
-                body = re.sub(r"^# Hermes — hasil\n\n(- .*\n)+\n---\n\n",
+                # Strip the worker's standard elieve header for brevity.
+                body = re.sub(r"^# Elieve — hasil\n\n(- .*\n)+\n---\n\n",
                               "", body, count=1)
                 lines.append(body)
             else:
@@ -436,6 +501,12 @@ class Orchestrator:
             "status": "done" if ok == len(results) and results else "partial",
             "updated_at": ts,
         }
+        if recon:
+            prog["recon_plan"] = {
+                "outdir": recon.get("outdir"),
+                "plan_md": recon.get("plan_md"),
+                "model": recon.get("model"),
+            }
         with open(os.path.join(outdir, "progress.json"), "w") as f:
             json.dump(prog, f, indent=2, ensure_ascii=False)
         return out_md
@@ -454,6 +525,13 @@ class Orchestrator:
                 "depth guard: workers may not run the orchestrator."
             )
         os.makedirs(outdir, exist_ok=True)
+        # Gap 6 — recon gate: fase plan read-only dulu; worker di-spawn
+        # SETELAH PLAN.md ada. Gagal -> OrchestratorError -> caller
+        # fallback single-agent. plan_first=false/absen -> lewati
+        # (perilaku lama, tanpa perubahan).
+        recon = None
+        if self.plan_first:
+            recon = self._run_recon_gate(task, outdir)
         print(f"[orchestrator] planning via {self.orchestrator_model} ...",
               flush=True)
         subtasks = self.plan(task)
@@ -491,6 +569,6 @@ class Orchestrator:
                 print(f"[orchestrator] w{i} finished: {r['status']}",
                       flush=True)
 
-        out_md = self.merge(task, results, outdir)
+        out_md = self.merge(task, results, outdir, recon=recon)
         print(f"[orchestrator] merged report: {out_md}", flush=True)
         return out_md

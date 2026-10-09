@@ -1,8 +1,8 @@
-"""Unit test Gap 1 — hook lifecycle system (hermes/hooks.py).
+"""Unit test Gap 1 — hook lifecycle system (elieve/hooks.py).
 
 Jalan tanpa 9router / API key / network (get_api_key & call_model di-mock
 untuk integrasi loop):
-    cd ~/workspace/hermes-agent && python3 -m unittest discover -s tests
+    cd ~/workspace/elieve && python3 -m unittest discover -s tests
 """
 
 import json
@@ -14,7 +14,7 @@ from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from hermes.hooks import (  # noqa: E402
+from elieve.hooks import (  # noqa: E402
     EVENTS,
     HOOK_ACTIONS,
     HookRunner,
@@ -24,7 +24,7 @@ from hermes.hooks import (  # noqa: E402
     persist_state,
     qc_tool_output,
 )
-import hermes.loop as LOOP  # noqa: E402
+import elieve.loop as LOOP  # noqa: E402
 
 
 def _tmpdir():
@@ -149,7 +149,7 @@ class TestShellActions(unittest.TestCase):
 
     def test_shell_receives_env(self):
         d = _tmpdir()
-        r = HookRunner({"PostToolUse": [{"shell": "echo $HERMES_EVENT"}]},
+        r = HookRunner({"PostToolUse": [{"shell": "echo $ELIEVE_EVENT"}]},
                        outdir=d)
         res = r.post_tool_use({"step": 5})
         # shell sukses -> tidak ada flag, tidak diblokir
@@ -194,18 +194,18 @@ class TestLoopIntegration(unittest.TestCase):
     def setUp(self):
         # Real exec tool calls need an existing workspace root; point it
         # at /tmp for the test and restore afterwards.
-        from hermes import tools as _tools
+        from elieve import tools as _tools
         self._prev_root = _tools.get_workspace_root()
         _tools.configure_roots("/tmp")
 
     def tearDown(self):
-        from hermes import tools as _tools
+        from elieve import tools as _tools
         _tools.configure_roots(self._prev_root)
 
     def _loop(self, hooks_cfg, **kw):
         outdir = _tmpdir()
         with mock.patch.object(LOOP, "get_api_key", return_value="k"):
-            loop = LOOP.HermesLoop(task="tugas uji", outdir=outdir,
+            loop = LOOP.ElieveLoop(task="tugas uji", outdir=outdir,
                                    model="ag/gemini-3-flash",
                                    hooks_cfg=hooks_cfg, **kw)
         return loop

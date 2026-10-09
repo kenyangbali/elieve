@@ -1,8 +1,8 @@
-"""Unit test Gap 2 — structured task tracking (hermes/tasks.py).
+"""Unit test Gap 2 — structured task tracking (elieve/tasks.py).
 
 Jalan tanpa 9router / API key / network (get_api_key di-mock untuk
 integrasi loop):
-    cd ~/workspace/hermes-agent && python3 -m unittest discover -s tests
+    cd ~/workspace/elieve && python3 -m unittest discover -s tests
 """
 
 import json
@@ -14,11 +14,11 @@ from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from hermes.tasks import TaskList  # noqa: E402
-from hermes import tools as T  # noqa: E402
-from hermes.tools import tasks as TT  # noqa: E402
-from hermes.compaction import micro_compact, mask_observations  # noqa: E402
-import hermes.loop as LOOP  # noqa: E402
+from elieve.tasks import TaskList  # noqa: E402
+from elieve import tools as T  # noqa: E402
+from elieve.tools import tasks as TT  # noqa: E402
+from elieve.compaction import micro_compact, mask_observations  # noqa: E402
+import elieve.loop as LOOP  # noqa: E402
 
 
 def fresh_tasks(**kw):
@@ -264,7 +264,7 @@ class TestLoopIntegration(unittest.TestCase):
         cfg = {"enabled": True, "max_tasks": 64, "summary_max_chars": 300}
         cfg.update(kw)
         with mock.patch.object(LOOP, "get_api_key", return_value="test-key"):
-            return LOOP.HermesLoop(task="t", outdir=outdir,
+            return LOOP.ElieveLoop(task="t", outdir=outdir,
                                    model="ag/gemini-3-flash", tasks_cfg=cfg)
 
     def _run_once(self, loop):

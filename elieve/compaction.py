@@ -1,6 +1,6 @@
 """Phase 1 — context compaction: 4-layer pipeline (full implementation).
 
-Problem: the `messages` history in HermesLoop grows unbounded until
+Problem: the `messages` history in ElieveLoop grows unbounded until
 max_steps. Re-sending the whole history every turn bloats input tokens.
 
 Design (docs/PHASE1-COMPACTION.md):
@@ -31,7 +31,7 @@ from .providers import (
     post_chat_completions,
 )
 
-log = logging.getLogger("hermes.compaction")
+log = logging.getLogger("elieve.compaction")
 
 # -- constants -------------------------------------------------------
 OFFLOADED_FMT = "[offloaded: {summary}]"   # Layer 1: old tool-result pointer
@@ -52,7 +52,7 @@ DEFAULT_MAX_AGE_HOURS = 24
 # Messages from these tools are excluded from micro_compact trimming and
 # observation masking: task state must survive compaction.
 # Ground truth stays in tasks.json; a fresh summary is injected into the
-# system prompt every turn by HermesLoop ("## Daftar task"). See hermes/tasks.py.
+# system prompt every turn by ElieveLoop ("## Daftar task"). See elieve/tasks.py.
 STATEFUL_TOOL_NAMES = frozenset({"task_update"})
 
 CHARS_PER_TOKEN = 4             # token-estimate heuristic when usage is absent

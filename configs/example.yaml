@@ -1,5 +1,5 @@
-# Example hermes-agent config — generic OpenAI-compatible provider.
-# Run: python3 -m hermes.loop --config configs/example.yaml --task "..." --outdir ./runs/demo
+# Example elieve config — generic OpenAI-compatible provider.
+# Run: python3 -m elieve.loop --config configs/example.yaml --task "..." --outdir ./runs/demo
 #
 # This file documents every core block the loop understands. Only `provider`
 # (endpoint + key source) is truly required; everything else has safe defaults.
@@ -48,4 +48,32 @@ system_prompt: null
 
 # --- Optional blocks ------------------------------------------------------
 # compaction / memory / permissions / hooks / tasks / accounting /
-# orchestrator — see configs/bug-hunter.yaml for a fully worked example.
+# checkpoints / orchestrator — see configs/bug-hunter.yaml for a fully
+# worked example.
+
+# Gap 5 — MCP client (elieve/mcp.py).
+# Optional: without this block (and without .mcp.json in cwd) the loop
+# behaves exactly as before. Each server tool is exposed as
+# mcp__<server>__<tool>. stdio server: {name, command, args};
+# HTTP server: {name, url} (default transport streamable-http;
+# "sse" for legacy SSE). A .mcp.json file in the cwd
+# ({"mcpServers": {...}}, Claude Code style) is also read; YAML wins
+# on name collisions.
+mcp:
+  enabled: true
+  timeout_s: 30
+  servers: []
+
+# Gap 4 — checkpoints / resume percakapan (elieve/checkpoints.py).
+# Snapshot messages + ringkasan state ke <outdir>/checkpoints/ckpt-<step>.json.
+# Default bila blok ini absen: enabled=true, every_n_steps=10.
+checkpoints:
+  enabled: true
+  every_n_steps: 10
+
+# Gap 6 — Plan mode (CLI --plan): riset read-only (exec dipaksa mati),
+# tulis <outdir>/PLAN.md dari jawaban akhir, lalu berhenti (exit 0).
+# plan_model kosong = pakai model utama. Tanpa blok ini: default aman.
+plan:
+  plan_model: ""             # mis. ag/gemini-3-flash ; kosong = model utama
+  max_steps: 30              # budget step fase riset

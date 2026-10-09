@@ -1,7 +1,7 @@
 """Unit test Fase 1 — context compaction (4 lapis).
 
 Jalan tanpa 9router / API key / network:
-    cd ~/workspace/hermes-agent && python3 -m unittest discover -s tests
+    cd ~/workspace/elieve && python3 -m unittest discover -s tests
 
 Angka pada TestSimulation40Turn adalah SIMULASI LOKAL (heuristik chars/4),
 bukan benchmark produksi.
@@ -16,8 +16,8 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from hermes import compaction as C  # noqa: E402
-from hermes.compaction import (  # noqa: E402
+from elieve import compaction as C  # noqa: E402
+from elieve.compaction import (  # noqa: E402
     ContextCompactor,
     apply_threshold_pipeline,
     estimate_tokens,
@@ -26,7 +26,7 @@ from hermes.compaction import (  # noqa: E402
     micro_compact,
     prune_middle,
 )
-from hermes.providers import ProviderConfig, check_model_allowed  # noqa: E402
+from elieve.providers import ProviderConfig, check_model_allowed  # noqa: E402
 
 # Policy equivalent of the old hardcoded "ag/* only, bns/*/oc/* rejected"
 # rule — now threaded explicitly instead of baked into the code.
@@ -321,8 +321,8 @@ class TestContextCompactorClass(unittest.TestCase):
 
 class TestLoopIntegration(unittest.TestCase):
     def test_call_model_returns_message_and_usage(self):
-        import hermes.loop as loopmod
-        # call_model uses the name imported into hermes.loop's namespace
+        import elieve.loop as loopmod
+        # call_model uses the name imported into elieve.loop's namespace
         orig = loopmod.post_chat_completions
         try:
             def fake_post(cfg, payload, api_key=None, timeout=None):
@@ -334,7 +334,7 @@ class TestLoopIntegration(unittest.TestCase):
                 })
             loopmod.post_chat_completions = fake_post
             cfg = ProviderConfig(base_url="http://127.0.0.1:1/v1",
-                                 api_key_env="HERMES_TEST_KEY")
+                                 api_key_env="ELIEVE_TEST_KEY")
             msg, usage = loopmod.call_model(
                 [{"role": "user", "content": "hi"}], "ag/gemini-3-flash",
                 cfg, api_key="K")
@@ -344,7 +344,7 @@ class TestLoopIntegration(unittest.TestCase):
             loopmod.post_chat_completions = orig
 
     def test_compaction_config_block(self):
-        import hermes.loop as loopmod
+        import elieve.loop as loopmod
         cfg = loopmod.load_config(
             os.path.join(os.path.dirname(os.path.dirname(
                 os.path.abspath(__file__))), "configs", "bug-hunter.yaml"))

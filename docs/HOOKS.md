@@ -1,7 +1,7 @@
 # Hook Lifecycle System (Gap 1)
 
 Event deterministik yang **tidak bisa di-skip model** — inspirasi Claude
-Code hooks, diimplementasikan original di `hermes/hooks.py`.
+Code hooks, diimplementasikan original di `elieve/hooks.py`.
 
 ## Event
 
@@ -30,7 +30,7 @@ hooks:
 
 Tiap aksi EITHER `{action: nama}` (callable terdaftar di `HOOK_ACTIONS`)
 OR `{shell: "cmd ...", timeout: 15, blocking: false}` (shell, env
-`HERMES_EVENT` / `HERMES_OUTDIR` / `HERMES_STEP`). String polos juga
+`ELIEVE_EVENT` / `ELIEVE_OUTDIR` / `ELIEVE_STEP`). String polos juga
 diterima sebagai nama action.
 
 ## Aksi bawaan (`HOOK_ACTIONS`)

@@ -1,7 +1,7 @@
 # Gap 3 — Akuntansi token & biaya
 
-Modul: `hermes/accounting.py`. Terintegrasi di `HermesLoop`
-(`hermes/loop.py`, param `accounting_cfg=`).
+Modul: `elieve/accounting.py`. Terintegrasi di `ElieveLoop`
+(`elieve/loop.py`, param `accounting_cfg=`).
 
 ## Yang dicatat
 

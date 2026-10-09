@@ -2,7 +2,7 @@
 
 Jalan tanpa 9router / API key / network (post_fn palsu untuk tidy,
 get_api_key di-mock untuk integrasi loop):
-    cd ~/workspace/hermes-agent && python3 -m unittest discover -s tests
+    cd ~/workspace/elieve && python3 -m unittest discover -s tests
 """
 
 import os
@@ -13,14 +13,14 @@ from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from hermes.memory import (  # noqa: E402
+from elieve.memory import (  # noqa: E402
     AgentMemory,
     contains_secret,
     DEFAULT_MAX_FACT_CHARS,
 )
-from hermes import tools as T  # noqa: E402
-from hermes.tools import memory as TM  # noqa: E402
-import hermes.loop as LOOP  # noqa: E402
+from elieve import tools as T  # noqa: E402
+from elieve.tools import memory as TM  # noqa: E402
+import elieve.loop as LOOP  # noqa: E402
 
 
 def fresh_mem(**kw):
@@ -189,7 +189,7 @@ class TestLoopIntegration(unittest.TestCase):
                "summarizer_model": "ag/gemini-3-flash"}
         cfg.update(kw)
         with mock.patch.object(LOOP, "get_api_key", return_value="test-key"):
-            return LOOP.HermesLoop(task="t", outdir=outdir,
+            return LOOP.ElieveLoop(task="t", outdir=outdir,
                                    model="ag/gemini-3-flash", memory_cfg=cfg)
 
     def test_recall_injected_into_system_prompt(self):
@@ -265,7 +265,7 @@ class TestLoopIntegration(unittest.TestCase):
         policy = {"allow": ["ag/*"], "forbid": ["bns/*", "oc/*"]}
         with mock.patch.object(LOOP, "get_api_key", return_value="k"):
             with self.assertRaises(ValueError):
-                LOOP.HermesLoop(
+                LOOP.ElieveLoop(
                     task="t", outdir=d, model="ag/gemini-3-flash",
                     memory_cfg={"summarizer_model": "bns/x"},
                     model_policy=policy)

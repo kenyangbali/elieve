@@ -2,7 +2,7 @@
 
 Jalan tanpa 9router / API key / network (post_fn palsu; get_api_key
 di-mock untuk integrasi loop):
-    cd ~/workspace/hermes-agent && python3 -m unittest discover -s tests
+    cd ~/workspace/elieve && python3 -m unittest discover -s tests
 """
 
 import json
@@ -14,8 +14,8 @@ from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from hermes.permissions import PermissionGate  # noqa: E402
-import hermes.loop as LOOP  # noqa: E402
+from elieve.permissions import PermissionGate  # noqa: E402
+import elieve.loop as LOOP  # noqa: E402
 
 
 def chat_response(verdict_text):
@@ -243,14 +243,14 @@ class TestModelValidation(unittest.TestCase):
         gate, _, _ = gate_with(
             classifier_model="qwen3-31b-custom",
             classifier_api_base="https://contoh.invalid/v1",
-            classifier_api_key_env="HERMES_TEST_KEY")
+            classifier_api_key_env="ELIEVE_TEST_KEY")
         self.assertTrue(gate.classifier_active())
 
 
 class TestLoopIntegration(unittest.TestCase):
     def _loop(self, **kw):
         with mock.patch.object(LOOP, "get_api_key", return_value="k"):
-            loop = LOOP.HermesLoop(
+            loop = LOOP.ElieveLoop(
                 task="t", outdir=tempfile.mkdtemp(),
                 model="ag/gemini-3-flash", **kw)
         return loop
@@ -287,9 +287,9 @@ class TestLoopIntegration(unittest.TestCase):
         loop.gate.classifier_model = "ag/gemini-3-flash"
         loop.gate._classifier_dead = False
         allowed, text = loop._gated_tool(
-            "read_file", {"path": "/home/hatch/workspace/hermes-agent/README.md"})
+            "read_file", {"path": "/home/hatch/workspace/elieve/README.md"})
         self.assertTrue(allowed)
-        self.assertIn("hermes", text.lower())
+        self.assertIn("elieve", text.lower())
 
 
 if __name__ == "__main__":

@@ -1,8 +1,8 @@
-"""Unit test Gap 3 — akuntansi token/biaya (hermes/accounting.py).
+"""Unit test Gap 3 — akuntansi token/biaya (elieve/accounting.py).
 
 Jalan tanpa 9router / API key / network (get_api_key & call_model di-mock
 untuk integrasi loop; usage selalu palsu):
-    cd ~/workspace/hermes-agent && python3 -m unittest discover -s tests
+    cd ~/workspace/elieve && python3 -m unittest discover -s tests
 """
 
 import contextlib
@@ -16,12 +16,12 @@ from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from hermes.accounting import (  # noqa: E402
+from elieve.accounting import (  # noqa: E402
     Accounting,
     UsageTracker,
     estimate_cost_for,
 )
-import hermes.loop as LOOP  # noqa: E402
+import elieve.loop as LOOP  # noqa: E402
 
 PRICES = {
     "ag/gemini-3-flash": {"input_per_1k": 0.0005, "output_per_1k": 0.002},
@@ -202,9 +202,9 @@ class TestCostCap(unittest.TestCase):
 
 
 def _make_loop(outdir, accounting_cfg):
-    """HermesLoop tanpa DB/network: get_api_key di-mock."""
+    """ElieveLoop tanpa DB/network: get_api_key di-mock."""
     with mock.patch.object(LOOP, "get_api_key", return_value="TEST-KEY"):
-        loop = LOOP.HermesLoop(
+        loop = LOOP.ElieveLoop(
             task="tugas uji",
             outdir=outdir,
             model="ag/gemini-3-flash",

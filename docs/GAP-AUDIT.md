@@ -1,7 +1,7 @@
-# GAP AUDIT — hermes-agent vs Claude Code (fitur publik)
+# GAP AUDIT — elieve vs Claude Code (fitur publik)
 
 Tanggal: 2026-10-09
-Metode: perbandingan arsitektur `hermes-agent/` (4 fase selesai, 108 test)
+Metode: perbandingan arsitektur `elieve/` (4 fase selesai, 108 test)
 terhadap fitur Claude Code yang **terdokumentasi publik** di docs resmi
 Anthropic. **Analisa murni — tidak memakai/mencari source bocor dalam
 bentuk apa pun, tidak menyalin kode dari mana pun.**
@@ -15,21 +15,21 @@ Sumber publik yang dipakai:
   (direferensikan dari riset publik)
 
 Konteks prioritas: **operasi bug bounty otonom** (bukan coding assistant
-umum). Hermes jalan non-interaktif, multi-run panjang, multi-model via
+umum). Elieve jalan non-interaktif, multi-run panjang, multi-model via
 9router (`ag/*`).
 
 ---
 
 ## 1. Tabel pemetaan
 
-| # | Fitur Claude Code (publik) | Status di hermes-agent |
+| # | Fitur Claude Code (publik) | Status di elieve |
 |---|---|---|
 | 1 | **Hooks lifecycle** (30+ event: SessionStart/End, UserPromptSubmit, PreToolUse/PostToolUse(+Failure), PermissionRequest/Denied, Stop, SubagentStart/Stop, PreCompact/PostCompact, FileChanged, Notification, …) | **Sebagian** — PermissionGate ≈ PreToolUse; ada audit log; autoDream berkala. Tanpa sistem hook umum (tak ada SessionStart/Stop/PostToolUse hook, tak ada hook user-defined) |
 | 2 | **Context compaction** (`/compact` + auto-compact + PreCompact hook) | **Ada** — Fase 1: 4 lapis (micro, threshold 70–95%, full via LLM, prefix preservation) |
 | 3 | **Memory: CLAUDE.md + auto memory** (instruksi proyek berlapis + catatan otomatis Claude) | **Ada (sebagian)** — AgentMemory + autoDream ≈ auto memory. Tanpa hierarki instruksi ala CLAUDE.md (user/project/local) |
 | 4 | **Subagents / Task tool** (konteks sendiri, frontmatter: description, tools, model, permissionMode; auto-delegasi berdasar deskripsi; tipe built-in Explore/Plan) | **Sebagian** — Orchestrator spawn worker subprocess paralel. Tanpa auto-delegasi berdasar deskripsi, tanpa tipe built-in, tanpa pewarisan permission |
 | 5 | **Permission modes** (default / acceptEdits / plan / bypassPermissions / dontAsk) | **Sebagian** — gate allow/deny/ask + flag `--no-exec` (read-only). Tanpa mode plan, tanpa mode-level policy |
-| 6 | **Plan mode** (EnterPlanMode: riset read-only → papar rencana → approve → eksekusi) | **Belum** |
+| 6 | **Plan mode** (EnterPlanMode: riset read-only → papar rencana → approve → eksekusi) | **Ada** (2026-10-09: flag `--plan` + recon gate `orchestrator.plan_first`) |
 | 7 | **TodoWrite / Task tools** (checklist terstruktur per sesi: pending/in_progress/completed) | **Belum** — `progress.json` hanya hitung step, bukan daftar tugas |
 | 8 | **Checkpoints / rewind / resume / fork** (checkpoint tiap prompt, `/rewind`, `--resume`, `--fork-session`) | **Sebagian** — run resumable via progress.json; tanpa resume percakapan, tanpa checkpoint/rewind |
 | 9 | **`/context`** (visualisasi isi context window) | **Belum** — estimasi token ada internal, tanpa tampilan user |
@@ -53,21 +53,21 @@ Ringkasan: **2 ada** (compaction, memory), **6 sebagian**, **10 belum** →
 ### G1. Hook lifecycle system — effort: SEDANG
 Claude Code punya 30+ event hook (PreToolUse, PostToolUse, SessionStart,
 Stop, PreCompact, …) berisi perintah deterministik yang **tidak bisa
-di-skip model**. Hermes baru punya satu titik (permission gate ≈
+di-skip model**. Elieve baru punya satu titik (permission gate ≈
 PreToolUse). Untuk bounty otonom berjam-jam, hook berarti: blokir pola
 berbahaya secara deterministik, QC otomatis tiap PostToolUse (mis. cek
 `OUT.md` parsial), simpan state saat Stop, dan checkpoint sebelum
 compaction — tanpa bergantung "model biasanya nurut".
 
 ### G2. Structured task tracking (TodoWrite) — effort: KECIL
-Claude Code melacak checklist terstruktur per sesi. Hermes cuma hitung
+Claude Code melacak checklist terstruktur per sesi. Elieve cuma hitung
 step di `progress.json`. Ronde bounty = puluhan target × checklist
 (recon → hunt → PoC → QC → draft); tanpa todo terstruktur, cakupan
 mudah bocor dan resume run panjang buta prioritas. Implementasi ringan:
 JSON list + tool `todo_write`/`todo_read`, ikut tersimpan saat compaction.
 
 ### G3. Akuntansi token/biaya + visibilitas konteks (`/cost`, `/context`) — effort: KECIL
-Claude Code menampilkan token & spend per sesi. Hermes tanpa akuntansi
+Claude Code menampilkan token & spend per sesi. Elieve tanpa akuntansi
 sama sekali — padahal operasi jalan di 11 koneksi Antigravity round-robin
 dengan kuota 5-jam/mingguan per akun. Tanpa ini, satu run liar bisa
 menghabiskan kuota akun Pro tanpa jejak. Butuh: log token per run +
@@ -75,19 +75,26 @@ per model, guardrail budget, dan perintah status konteks.
 
 ### G4. Checkpoints / resume percakapan — effort: SEDANG
 Claude Code menyimpan checkpoint tiap prompt dan bisa `--resume` sesi
-lama. Hermes tiap run mulai dari nol; `progress.json` hanya simpan step
+lama. Elieve tiap run mulai dari nol; `progress.json` hanya simpan step
 terakhir, bukan percakapan. Run bounty 40-step yang mati di step 35
 kehilangan seluruh konteks investigasi — padahal konteks itulah yang
 mahal. Butuh: snapshot messages per N step + mode resume dari snapshot.
 
 ### G5. MCP client — effort: SEDANG–BESAR
 MCP adalah cara standar Claude Code menyambung tool eksternal (browser,
-DB, API). Hermes toolset-nya tertutup (read/search/exec/memory). Untuk
+DB, API). Elieve toolset-nya tertutup (read/search/exec/memory). Untuk
 bounty, MCP membuka: browser automation (Playwright) untuk PoC dinamis,
 klien HTTP terstruktur, query DB temuan — tanpa menambah kode tool
 manual satu per satu.
 
 ### G6. Plan mode — effort: SEDANG
+**Status 2026-10-09: SELESAI** — `elieve/planmode.py` (run_plan read-only
+via `no_exec`, tulis `<outdir>/PLAN.md` dengan bagian Tujuan / Permukaan
+yang dipetakan / Langkah rencana / Estimasi, lalu berhenti exit 0);
+flag CLI `--plan` (model dari blok `plan.plan_model`, kosong = model
+utama); recon gate `orchestrator.plan_first: true` (fase plan dulu,
+worker di-spawn setelah PLAN.md ada; `false`/absen = perilaku lama).
+Test: `tests/test_plan.py` (20 test).
 Mode riset read-only: agent memetakan permukaan dulu, memaparkan rencana,
 baru eksekusi setelah approve. Untuk bounty otonom, variannya adalah
 "recon gate": worker recon (read-only, murah) wajib selesai sebelum
@@ -102,18 +109,18 @@ dimuat saat relevan: hemat token + playbook bisa di-versioning terpisah.
 
 ### G8. Auto-delegasi subagent by description — effort: SEDANG
 Claude Code mendelegasikan otomatis berdasar deskripsi subagent.
-Orchestrator Hermes butuh mandor LLM memecah task manual tiap run.
+Orchestrator Elieve butuh mandor LLM memecah task manual tiap run.
 Registry worker bertipe ("recon-web", "poc-dinamis", "qc") dengan
 deskripsi + auto-routing = ronde bounty bisa jalan tanpa tahap planning
 LLM yang mahal setiap kali.
 
 ### G9. Slash commands / CLI verbs — effort: KECIL
 Perintah seperti `/status`, `/tidy`, `/resume` untuk inspeksi cepat.
-Hermes hanya punya flag CLI tersebar. Nilai operasional: cek status run
+Elieve hanya punya flag CLI tersebar. Nilai operasional: cek status run
 tanpa membuka file JSON manual.
 
 ### G10. Worktree isolation untuk worker — effort: SEDANG
-Claude Code bisa mengisolasi subagent di git worktree. Worker Hermes
+Claude Code bisa mengisolasi subagent di git worktree. Worker Elieve
 berbagi filesystem — satu worker liar bisa mengotori outdir worker lain.
 Isolasi = kegagalan tertampung, artefak PoC tidak tercampur.
 
@@ -124,17 +131,17 @@ Tool fetch dengan ekstraksi ringkas menghemat konteks signifikan.
 
 ### G12. `/doctor` diagnostics — effort: KECIL
 Claude Code punya checkup setup (config, hook lambat, duplikat skill).
-Hermes tanpa diagnostik mandiri — masalah seperti "DB 9router tak
+Elieve tanpa diagnostik mandiri — masalah seperti "DB 9router tak
 terbaca" baru ketahuan saat run gagal. Satu perintah `doctor` memangkas
 waktu debug infra.
 
 ### G13. Plugin / marketplace — effort: BESAR
-Format distribusi `.claude-plugin/`. Relevan hanya bila hermes-agent
+Format distribusi `.claude-plugin/`. Relevan hanya bila elieve
 didistribusikan ke pihak lain (rencana armada VM Bayu). Untuk operasi
 bounty saat ini: prioritas rendah.
 
 ### G14. AskUserQuestion — effort: KECIL
-Klarifikasi interaktif terstruktur. Hermes by design non-interaktif
+Klarifikasi interaktif terstruktur. Elieve by design non-interaktif
 (directive "gas terus"), jadi gap ini disengaja — prioritas terendah.
 
 ---
@@ -165,6 +172,6 @@ menghabiskan kuota akun Pro tanpa peringatan.
 
 ---
 
-*Catatan: estimasi effort relatif terhadap basis kode hermes-agent saat
+*Catatan: estimasi effort relatif terhadap basis kode elieve saat
 ini (Python, ~108 test). "Kecil" ≈ 1 modul + test < 1 hari kerja builder;
 "Sedang" ≈ integrasi loop + config; "Besar" ≈ subsistem baru lintas modul.*

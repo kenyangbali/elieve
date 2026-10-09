@@ -1,4 +1,4 @@
-# Arsitektur hermes-agent
+# Arsitektur elieve
 
 Desain ini terinspirasi pola umum arsitektur agent coding modern
 (agent loop + tool sandbox + permission pipeline + context management)
@@ -6,12 +6,12 @@ yang terdokumentasi luas di literatur publik. Seluruh implementasi di
 repo ini adalah karya original — tidak ada kode hasil bocoran apa pun.
 
 Prinsip inti: **model bisa diganti-ganti, harness yang menentukan kualitas.**
-Karena itu investasi utama repo ini ada di harness (`hermes/`), bukan di
+Karena itu investasi utama repo ini ada di harness (`elieve/`), bukan di
 prompt.
 
 ```
                     ┌─────────────┐
-                    │   HermesLoop │  (hermes/loop.py — v1, sudah jalan)
+                    │   ElieveLoop │  (elieve/loop.py — v1, sudah jalan)
                     └──────┬──────┘
         ┌──────────────────┼──────────────────┐
         ▼                  ▼                  ▼
@@ -30,7 +30,7 @@ prompt.
 
 ---
 
-## 1. Context Compaction (Fase 1) — `hermes/compaction.py`
+## 1. Context Compaction (Fase 1) — `elieve/compaction.py`
 
 **Masalah.** Riwayat `messages` tumbuh setiap turn. Tanpa pemampatan:
 biaya input membengkak, konteks awal terdorong keluar jendela, dan
@@ -53,7 +53,7 @@ setiap turn membayar ulang token yang sama.
 **Kontrak.** `ContextCompactor.maybe_compact(messages, api_key)` —
 dipanggil di awal tiap iterasi loop; no-op bila di bawah ambang.
 
-## 2. MEMORY.md + autoDream (Fase 2) — `hermes/memory.py`
+## 2. MEMORY.md + autoDream (Fase 2) — `elieve/memory.py`
 
 **Masalah.** Tiap sesi mulai dari nol; pelajaran run sebelumnya hilang.
 
@@ -66,7 +66,7 @@ dipanggil di awal tiap iterasi loop; no-op bila di bawah ambang.
   hapus yang basi, rapikan format, memakai model murah.
 - **Filter rahasia**: API key, token, kredensial tidak pernah ditulis.
 
-## 3. Permission Classifier 2 Tahap (Fase 3) — `hermes/permissions.py`
+## 3. Permission Classifier 2 Tahap (Fase 3) — `elieve/permissions.py`
 
 **Masalah.** Deny-list regex (v1) tidak paham konteks dan rapuh terhadap
 variasi penulisan.
@@ -87,13 +87,13 @@ variasi penulisan.
   -> fallback lapisan 0 per-call, auto-disable setelah 3 gagal beruntun.
   Run tidak pernah crash gara-gara classifier.
 
-## 4. Multi-Agent Orchestration (Fase 4) — `hermes/orchestrator.py`
+## 4. Multi-Agent Orchestration (Fase 4) — `elieve/orchestrator.py`
 
 **Masalah.** Satu agent untuk audit besar = lambat dan tunnel vision.
 
 **Desain.**
 - Orchestrator (model kuat) memecah task jadi subtask independen,
-  spawn maks 4 `HermesLoop` worker paralel.
+  spawn maks 4 `ElieveLoop` worker paralel.
 - Tiap worker: **toolset terbatas** sesuai subtask (mis. mode baca-saja
   tanpa `exec`), outdir + budget `max_steps` sendiri.
 - Worker **dilarang spawn worker lain** (kedalaman maks 1).

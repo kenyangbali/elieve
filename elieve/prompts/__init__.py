@@ -1,4 +1,4 @@
-"""hermes.prompts — default system prompts (English + Indonesian).
+"""elieve.prompts — default system prompts (English + Indonesian).
 
 Use :func:`get_system_prompt` to fetch the default prompt for a language
 code (``"en"`` | ``"id"``). Unknown codes fall back to English. The

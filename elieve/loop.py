@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""hermes.loop — baseline v1 ReAct loop.
+"""elieve.loop — baseline v1 ReAct loop.
 
 Pattern: task -> chat -> tool_calls -> run tools -> feed back -> ...
 until the model finishes (final answer without tool calls) or max-steps.
@@ -31,6 +31,14 @@ from .tools import (
 from .permissions import PermissionGate
 from .hooks import HookRunner
 from .accounting import Accounting
+from .checkpoints import (
+    CheckpointError,
+    DEFAULT_EVERY_N_STEPS,
+    list_checkpoints,
+    load_checkpoint,
+    save_checkpoint,
+    should_save,
+)
 from .tasks import (
     TaskList,
     DEFAULT_MAX_TASKS,
@@ -138,14 +146,27 @@ def _fallback_tool_call(text: str, dispatch=None):
     return None
 
 
-class HermesLoop:
+_TASKS_BLOCK_RE = re.compile(r"\n\n## Daftar task\n.*$", re.S)
+
+
+def _strip_tasks_block(content: str) -> str:
+    """Buang blok '## Daftar task' injeksi turn lama (untuk resume).
+
+    Loop menyuntik blok fresh tiap turn; tanpa strip, resume akan
+    menumpuk blok basi di system prompt. Hanya blok di AKHIR yang dibuang.
+    """
+    return _TASKS_BLOCK_RE.sub("", content or "")
+
+
+class ElieveLoop:
     """One ReAct session: send the task, iterate tool calls to a final answer."""
 
     def __init__(self, task, outdir, model=None, max_steps=40,
                  system_prompt=None, compaction_cfg=None,
                  memory_cfg=None, permissions_cfg=None, no_exec=False,
                  hooks_cfg=None, tasks_cfg=None,
-                 accounting_cfg=None, provider_cfg=None, model_policy=None):
+                 accounting_cfg=None, provider_cfg=None, model_policy=None,
+                 checkpoints_cfg=None, resume_record=None):
         self.task = task
         self.outdir = outdir
         # Provider + model policy come from configuration (never hardcoded).
@@ -194,7 +215,7 @@ class HermesLoop:
         # Early validation: the summarizer must satisfy the model policy.
         check_model_allowed(self.compaction["summarizer_model"],
                             self.model_policy)
-        # Gap 3 — token/cost accounting (hermes/accounting.py).
+        # Gap 3 — token/cost accounting (elieve/accounting.py).
         # accounting_cfg None/empty -> enabled by default, cap inactive.
         # context_limit comes from the compaction config (chars/4 fallback
         # when the provider sends no usage).
@@ -236,7 +257,7 @@ class HermesLoop:
             provider_cfg=self.provider_cfg,
             model_policy=self.model_policy,
         )
-        # Gap 2 — structured task tracking (hermes/tasks.py).
+        # Gap 2 — structured task tracking (elieve/tasks.py).
         # tasks_cfg None/empty -> enabled by default.
         self.tasks_cfg = {
             "enabled": True,
@@ -254,6 +275,18 @@ class HermesLoop:
             bind_tasks(self.tasks)
         else:
             unbind_tasks()
+        # Gap 4 — checkpoints / resume percakapan (elieve/checkpoints.py).
+        # checkpoints_cfg None/empty -> enabled by default, tiap 10 step.
+        self.checkpoints = {
+            "enabled": True,
+            "every_n_steps": DEFAULT_EVERY_N_STEPS,
+        }
+        if checkpoints_cfg:
+            self.checkpoints.update(checkpoints_cfg)
+        # Resume dari snapshot: step + messages + state, bukan dari nol.
+        self._resume_record = resume_record
+        if resume_record is not None:
+            self._restore_resume_state(resume_record)
 
     # -- output ------------------------------------------------------
 
@@ -264,7 +297,7 @@ class HermesLoop:
 
     def _write_out(self, content, status):
         header = (
-            "# Hermes — hasil\n\n"
+            "# Elieve — hasil\n\n"
             f"- Task: {self.task}\n"
             f"- Model: {self.model}\n"
             f"- Status: {status}\n"
@@ -297,9 +330,68 @@ class HermesLoop:
             (usage or {}).get("prompt_tokens") or 0)
         self.acct.maybe_periodic_save(step)
         if self.acct.cap_reached():
-            print(f"[hermes] {self.acct.cap_message()}", flush=True)
+            print(f"[elieve] {self.acct.cap_message()}", flush=True)
             return True
         return False
+
+    # -- checkpoints (Gap 4) -----------------------------------------
+
+    def _checkpoint_state(self):
+        """Ringkasan state untuk snapshot: usage + tasks + identitas run."""
+        return {
+            "task": self.task,
+            "model": self.model,
+            "max_steps": self.max_steps,
+            "usage": self.acct.tracker.to_dict(),
+            "tasks": self.tasks.list() if self.tasks else [],
+        }
+
+    def _maybe_checkpoint(self, messages, force=False):
+        """Simpan checkpoint bila jatuh tempo (tiap N step) / force=True.
+
+        Best effort — kegagalan tulis dicatat ke stdout, TIDAK PERNAH
+        crash-kan run (perilaku run default tidak berubah).
+        """
+        if not self.checkpoints.get("enabled", True):
+            return
+        if not force and not should_save(
+                self._step, self.checkpoints.get("every_n_steps")):
+            return
+        try:
+            path = save_checkpoint(
+                self.outdir, self._step, messages,
+                state=self._checkpoint_state())
+        except Exception as e:  # corrupt config / disk penuh / dsb.
+            print(f"[elieve] warning: checkpoint gagal: {e}", flush=True)
+        else:
+            print(f"[elieve] checkpoint: step {self._step} -> {path}",
+                  flush=True)
+
+    def _restore_resume_state(self, record):
+        """Kembalikan ringkasan state dari snapshot (usage tracker).
+
+        Task list tidak perlu dipulihkan manual: TaskList sudah membaca
+        <outdir>/tasks.json yang sama saat resume ke outdir yang sama.
+        Usage tracker diisi ulang agar usage.json kontinu antar resume.
+        Best effort — tidak boleh crash-kan resume.
+        """
+        try:
+            saved = (record.get("state") or {}).get("usage") or {}
+            models = saved.get("models") or {}
+            tracker = self.acct.tracker
+            for model, data in models.items():
+                if not isinstance(data, dict):
+                    continue
+                bucket = tracker._bucket(model)
+                for k in ("prompt_tokens", "completion_tokens",
+                          "total_tokens", "calls", "estimated_calls"):
+                    try:
+                        bucket[k] = max(0, int(data.get(k) or 0))
+                    except (TypeError, ValueError):
+                        pass
+        except Exception as e:
+            print(f"[elieve] warning: restore state resume gagal: {e}",
+                  flush=True)
 
     def _finish_accounting(self):
         """Gap 3: write <outdir>/usage.json + print the summary to stdout.
@@ -314,7 +406,7 @@ class HermesLoop:
         except Exception as e:
             print(f"[accounting] failed to write usage.json: {e}", flush=True)
         else:
-            print(f"[hermes] usage.json written: {path}", flush=True)
+            print(f"[elieve] usage.json written: {path}", flush=True)
         print(self.acct.summary_text(), flush=True)
 
     # -- tool dispatch -----------------------------------------------
@@ -338,10 +430,10 @@ class HermesLoop:
         """
         verdict, reason = self.gate.check(name, args or {})
         if verdict == "deny":
-            print(f"[hermes]   gate: DENY {name}: {reason[:120]}", flush=True)
+            print(f"[elieve]   gate: DENY {name}: {reason[:120]}", flush=True)
             return False, f"IZIN DITOLAK oleh permission gate: {reason}"
         if verdict == "ask":
-            print(f"[hermes]   gate: ASK {name}: {reason[:120]}", flush=True)
+            print(f"[elieve]   gate: ASK {name}: {reason[:120]}", flush=True)
             return False, (
                 "IZIN DITOLAK oleh permission gate (butuh konfirmasi manusia; "
                 f"loop non-interaktif): {reason}"
@@ -381,14 +473,14 @@ class HermesLoop:
         if not allowed:
             reason = "; ".join(r for r in reasons if r) or "rejected"
             print(
-                f"[hermes]   hook PreToolUse: BLOCK {name}: {reason[:160]}",
+                f"[elieve]   hook PreToolUse: BLOCK {name}: {reason[:160]}",
                 flush=True,
             )
             result = f"HOOK DITOLAK oleh PreToolUse: {reason}"
         elif name not in self.dispatch:
             result = f"unknown tool: {name}"
         else:
-            print(f"[hermes]   tool: {name} {str(args)[:120]}", flush=True)
+            print(f"[elieve]   tool: {name} {str(args)[:120]}", flush=True)
             _ok, result = self._gated_tool(name, args)
         post = self.hooks.post_tool_use(
             dict(ctx, tool_output=str(result)))
@@ -396,7 +488,7 @@ class HermesLoop:
         if flags:
             self._qc_flags.extend(flags)
             print(
-                f"[hermes]   hook PostToolUse: qc_flags={flags}",
+                f"[elieve]   hook PostToolUse: qc_flags={flags}",
                 flush=True,
             )
         if post.get("blocked"):
@@ -412,7 +504,7 @@ class HermesLoop:
             self.hooks.on_stop(
                 self._hook_ctx_base({"status": status, "note": note}))
         except Exception as e:  # belt-and-suspenders
-            print(f"[hermes] hook OnStop failed: {e}", flush=True)
+            print(f"[elieve] hook OnStop failed: {e}", flush=True)
 
     def _fire_on_error(self, err):
         """OnError: log to errors.jsonl + run the OnError hook."""
@@ -420,7 +512,7 @@ class HermesLoop:
             self.hooks.on_error(
                 self._hook_ctx_base({"error": str(err)[:1000]}))
         except Exception as e:  # belt-and-suspenders
-            print(f"[hermes] hook OnError failed: {e}", flush=True)
+            print(f"[elieve] hook OnError failed: {e}", flush=True)
 
     # -- compaction (Phase 1) ------------------------------------------
 
@@ -462,6 +554,11 @@ class HermesLoop:
             summarizer=self._summarize_for_compaction,
         )
         fire_post_compact(self.hooks, ctx, {"compact_actions": actions})
+        if actions:
+            # Gap 4: snapshot SEBELUM konteks dimampatkan — memakai titik
+            # waktu hook PreCompact yang sama (tanpa mekanisme duplikat).
+            # force=True karena ini di luar jadwal periodik tiap-N-step.
+            self._maybe_checkpoint(messages, force=True)
         return out, actions
 
     # -- task tracking (Gap 2) ----------------------------------------
@@ -471,7 +568,7 @@ class HermesLoop:
 
         Re-injected FRESH every turn before the model call so task state
         survives compaction: the system prompt sits in the prefix_len zone
-        that the compaction pipeline never touches (see hermes/tasks.py).
+        that the compaction pipeline never touches (see elieve/tasks.py).
         """
         if not self.tasks:
             return ""
@@ -512,12 +609,12 @@ class HermesLoop:
             with open(cpath, "w") as f:
                 f.write(str(counter))
         except OSError as e:
-            print(f"[hermes] warning: memory counter write failed: {e}",
+            print(f"[elieve] warning: memory counter write failed: {e}",
                   flush=True)
         every = max(1, int(self.memory_cfg["tidy_every_runs"]))
         if counter % every == 0:
             try:
-                print(f"[hermes] autoDream: tidying MEMORY.md (run #{counter}) ...",
+                print(f"[elieve] autoDream: tidying MEMORY.md (run #{counter}) ...",
                       flush=True)
                 self.memory.tidy(
                     self.api_key,
@@ -526,7 +623,7 @@ class HermesLoop:
                     provider_cfg=self.provider_cfg,
                 )
             except Exception as e:
-                print(f"[hermes] autoDream failed (continuing without tidy): {e}",
+                print(f"[elieve] autoDream failed (continuing without tidy): {e}",
                       flush=True)
         return self.memory.recall()
 
@@ -553,25 +650,42 @@ class HermesLoop:
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": self.task},
         ]
+        start_step = 0
+        if self._resume_record is not None:
+            # Gap 4 (--resume): LANJUT dari snapshot — step + messages +
+            # state. Bukan mulai dari nol. Blok task lama di-strip agar
+            # injeksi fresh tiap turn tidak menumpuk.
+            rec = self._resume_record
+            start_step = int(rec.get("step") or 0)
+            base_system_prompt = _strip_tasks_block(
+                (rec.get("messages") or [{}])[0].get("content") or "")
+            messages = [dict(m) for m in (rec.get("messages") or [])]
+            print(
+                f"[elieve] resume dari checkpoint step {start_step} "
+                f"({len(messages)} messages).",
+                flush=True,
+            )
         prog = {
             "task": self.task,
             "model": self.model,
             "outdir": self.outdir,
-            "step": 0,
+            "step": start_step,
             "max_steps": self.max_steps,
             "status": "running",
             "last_tool": None,
         }
+        if start_step:
+            prog["resumed_from"] = start_step
         self._write_progress(prog)
 
-        step = 0
+        step = start_step
         while step < self.max_steps:
             step += 1
             self._step = step  # hook ctx always knows the running step
             if step > 1:
                 time.sleep(MODEL_CALL_DELAY_S)
             print(
-                f"[hermes] step {step}/{self.max_steps} -> {self.model} ...",
+                f"[elieve] step {step}/{self.max_steps} -> {self.model} ...",
                 flush=True,
             )
             # Layer 1: micro-compaction every turn BEFORE the request (no LLM)
@@ -594,7 +708,7 @@ class HermesLoop:
                 )
                 self._fire_on_stop("rate_limited", str(e))
                 self._finish_accounting()    # Gap 3
-                print(f"[hermes] {e}", flush=True)
+                print(f"[elieve] {e}", flush=True)
                 return 0
             except Exception as e:
                 prog.update(step=step, status="error", note=str(e)[:300])
@@ -602,7 +716,7 @@ class HermesLoop:
                 self._fire_on_error(e)       # Gap 1: OnError
                 self._fire_on_stop("error", str(e)[:300])
                 self._finish_accounting()    # Gap 3: usage.json + summary
-                print(f"[hermes] ERROR: {e}", flush=True)
+                print(f"[elieve] ERROR: {e}", flush=True)
                 return 1
 
             # Gap 3 — accounting after every call_model; stop cleanly when
@@ -635,7 +749,7 @@ class HermesLoop:
             )
             for act in compact_actions:
                 print(
-                    f"[hermes] compaction: {act} "
+                    f"[elieve] compaction: {act} "
                     f"(prompt_tokens~{prompt_tokens})",
                     flush=True,
                 )
@@ -668,13 +782,14 @@ class HermesLoop:
                     prog["qc_flags"] = list(self._qc_flags)
                 prog.update(step=step, status="running")
                 self._write_progress(prog)
+                self._maybe_checkpoint(messages)  # Gap 4: tiap N step
                 continue
 
             content = msg.get("content") or ""
             fb = _fallback_tool_call(content, self.dispatch)
             if fb:
                 name, args = fb
-                print(f"[hermes]   tool (fallback): {name}", flush=True)
+                print(f"[elieve]   tool (fallback): {name}", flush=True)
                 result = self._dispatch_tool(name, args)
                 messages.append(
                     {
@@ -687,6 +802,7 @@ class HermesLoop:
                     prog["qc_flags"] = list(self._qc_flags)
                 prog.update(step=step, status="running", last_tool=name)
                 self._write_progress(prog)
+                self._maybe_checkpoint(messages)  # Gap 4: tiap N step
                 continue
 
             # final answer — no tool calls
@@ -695,9 +811,11 @@ class HermesLoop:
             self._write_out(content, "done")
             self._fire_on_stop("done")
             self._finish_accounting()    # Gap 3: usage.json + summary
-            print(f"[hermes] selesai di step {step}. OUT.md ditulis.", flush=True)
+            print(f"[elieve] selesai di step {step}. OUT.md ditulis.", flush=True)
             return 0
 
+        # Gap 4: checkpoint terakhir agar run bisa di-resume dari sini.
+        self._maybe_checkpoint(messages, force=True)
         prog.update(
             status="max_steps",
             note=f"max-steps ({self.max_steps}) tercapai tanpa jawaban akhir.",
@@ -711,7 +829,7 @@ class HermesLoop:
         self._fire_on_stop("max_steps",
                            f"max-steps ({self.max_steps}) tercapai")
         self._finish_accounting()    # Gap 3: usage.json + summary
-        print("[hermes] max-steps tercapai.", flush=True)
+        print("[elieve] max-steps tercapai.", flush=True)
         return 0
 
 
@@ -728,11 +846,14 @@ def load_config(path):
 
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(
-        description="hermes-agent — ReAct loop over an OpenAI-compatible provider."
+        description="elieve — ReAct loop over an OpenAI-compatible provider."
     )
-    ap.add_argument("--task", required=True, help="task for the agent")
-    ap.add_argument("--outdir", required=True,
-                    help="output directory (OUT.md + progress.json)")
+    ap.add_argument("--task", required=False, default=None,
+                    help="task for the agent (optional with --resume: "
+                         "taken from the checkpoint when omitted)")
+    ap.add_argument("--outdir", required=False, default=None,
+                    help="output directory (OUT.md + progress.json); "
+                         "not needed with --resume (uses the resume dir)")
     ap.add_argument("--model", default=None,
                     help="model override (default: top-level config 'model:' "
                          "or provider.model)")
@@ -760,12 +881,73 @@ def main(argv=None) -> int:
         help="read-only mode: drop the `exec` tool from this run's toolset "
              "(used by orchestrator workers).",
     )
+    ap.add_argument(
+        "--plan",
+        action="store_true",
+        help="Gap 6: plan mode — riset read-only (exec dipaksa mati), "
+             "tulis <outdir>/PLAN.md dari jawaban akhir, lalu berhenti "
+             "(exit 0). Tidak ada fase eksekusi.",
+    )
+    ap.add_argument(
+        "--resume",
+        default=None, metavar="OUTDIR",
+        help="Gap 4: continue from the latest checkpoint in OUTDIR "
+             "(step + messages + state) instead of starting from zero. "
+             "Outputs keep going into OUTDIR; --task defaults to the "
+             "checkpoint's task.",
+    )
+    ap.add_argument(
+        "--list-checkpoints",
+        action="store_true",
+        help="Gap 4: list checkpoints in --outdir, then exit 0.",
+    )
     args = ap.parse_args(argv)
+
+    # Gap 4: --list-checkpoints exits before any config/model/key work.
+    if args.list_checkpoints:
+        if not args.outdir:
+            sys.stderr.write("ERROR: --list-checkpoints butuh --outdir.\n")
+            return 2
+        found = list_checkpoints(args.outdir)
+        if found:
+            for item in found:
+                print(f"step {item['step']}: {item['path']}")
+        else:
+            print("(tidak ada checkpoint)")
+        return 0
+
+    # Gap 4: --resume loads the latest checkpoint from the given outdir.
+    # Corrupt/missing -> clear error + non-zero exit (never a mystery).
+    resume_record = None
+    if args.resume:
+        try:
+            resume_record = load_checkpoint(args.resume)
+        except CheckpointError as e:
+            sys.stderr.write(f"ERROR: {e}\n")
+            return 2
+        outdir = os.path.abspath(args.resume)
+        task = (args.task or resume_record.get("task") or "").strip()
+        if not task:
+            sys.stderr.write(
+                "ERROR: --resume dipakai tanpa --task dan checkpoint "
+                "tidak menyimpan task — isi --task.\n")
+            return 2
+    else:
+        if not args.outdir:
+            sys.stderr.write(
+                "ERROR: --outdir wajib diisi (atau pakai --resume).\n")
+            return 2
+        if not args.task:
+            sys.stderr.write(
+                "ERROR: --task wajib diisi (atau pakai --resume).\n")
+            return 2
+        outdir = args.outdir
+        task = args.task
 
     cfg = load_config(args.config) if args.config else {}
     memory_cfg = cfg.get("memory") or {}
 
-    # Provider: endpoint + key source + default model (hermes/providers.py).
+    # Provider: endpoint + key source + default model (elieve/providers.py).
     # All environment specifics live in config — nothing hardcoded here.
     provider_cfg = ProviderConfig.from_dict(cfg.get("provider") or {})
     model_policy = cfg.get("model_policy") or {}
@@ -794,11 +976,48 @@ def main(argv=None) -> int:
     # enabled AND orchestrator_model is set. Empty model / enabled=false
     # -> 100% single-agent, as before.
     orch_cfg = cfg.get("orchestrator") or {}
+    # Gap 6 — Plan mode: riset read-only -> PLAN.md -> berhenti (exit 0).
+    # Berdiri sendiri: tanpa orchestrator dan tanpa MCP (tool eksternal
+    # bisa mengeksekusi, jadi tidak dimuat di mode read-only ini).
+    # --plan tidak mengubah perilaku default sama sekali.
+    if args.plan:
+        from .planmode import resolve_plan_model, run_plan
+        plan_cfg = cfg.get("plan") or {}
+        try:
+            plan_model = resolve_plan_model(
+                plan_cfg, model, model_policy)
+        except ValueError as e:
+            sys.stderr.write(f"ERROR: {e}\n")
+            return 2
+        return run_plan(
+            task, outdir, plan_model,
+            provider_cfg=provider_cfg,
+            model_policy=model_policy,
+            max_steps=int(plan_cfg.get("max_steps")
+                          or cfg.get("max_steps", args.max_steps)),
+            lang=lang,
+            workspace_root=workspace_root,
+            system_prompt=args.system_prompt or cfg.get("system_prompt"),
+            compaction_cfg=cfg.get("compaction"),
+            memory_cfg=memory_cfg or None,
+            permissions_cfg=cfg.get("permissions"),
+            hooks_cfg=cfg.get("hooks"),
+            tasks_cfg=cfg.get("tasks"),
+            accounting_cfg=cfg.get("accounting"),
+            checkpoints_cfg=cfg.get("checkpoints"),
+            resume_record=resume_record,
+        )
     orch_wanted = bool(orch_cfg.get("enabled", True)) and bool(
         (orch_cfg.get("orchestrator_model") or "").strip()
     )
+    if orch_wanted and resume_record is not None:
+        # Gap 4: resume selalu single-agent (orchestrator tidak tahu
+        # cara melanjutkan snapshot); catat, jangan crash.
+        print("[elieve] --resume: orchestrator dilewati "
+              "(lanjut single-agent).", flush=True)
+        orch_wanted = False
     if orch_wanted:
-        if os.environ.get("_HERMES_WORKER") == "1":
+        if os.environ.get("_ELIEVE_WORKER") == "1":
             sys.stderr.write(
                 "ERROR: depth guard — workers may not run the orchestrator.\n"
             )
@@ -808,8 +1027,8 @@ def main(argv=None) -> int:
         try:
             orch = Orchestrator.from_config(
                 orch_cfg,
-                task=args.task,
-                outdir=args.outdir,
+                task=task,
+                outdir=outdir,
                 model=model,
                 provider_cfg=provider_cfg,
                 model_policy=model_policy,
@@ -821,21 +1040,21 @@ def main(argv=None) -> int:
                 system_prompt=args.system_prompt
                 or cfg.get("system_prompt"),
             )
-            orch.run(args.task, args.outdir)
+            orch.run(task, outdir)
             return 0
         except OrchestratorError as e:
             # Dead planner / failed plan / depth guard: fall back to
             # single-agent; the run must not crash because of this.
             print(
-                f"[hermes] orchestrator failed ({e}) — "
+                f"[elieve] orchestrator failed ({e}) — "
                 f"falling back to single-agent.",
                 flush=True,
             )
 
     if args.tidy:
-        os.makedirs(args.outdir, exist_ok=True)
+        os.makedirs(outdir, exist_ok=True)
         mem = AgentMemory(
-            os.path.join(args.outdir, "MEMORY.md"),
+            os.path.join(outdir, "MEMORY.md"),
             max_fact_chars=int(memory_cfg.get("max_fact_chars",
                                               DEFAULT_MAX_FACT_CHARS)),
         )
@@ -856,28 +1075,50 @@ def main(argv=None) -> int:
         print("MEMORY.md after tidy:\n" + (new_text or "(empty)"))
         return 0
 
+    # Gap 5 — MCP client (elieve/mcp.py): start server yang dikonfigurasi
+    # (blok `mcp:` di YAML dan/atau .mcp.json di cwd) lalu daftarkan tiap
+    # tool-nya sebagai mcp__<server>__<tool> di DISPATCH + TOOL_SCHEMAS.
+    # Tanpa config -> bind_mcp() no-op (return None): loop jalan persis
+    # seperti biasa. Server dimatikan rapi di finally (semua jalur keluar,
+    # termasuk SystemExit dari resolusi API key).
     try:
-        loop = HermesLoop(
-            task=args.task,
-            outdir=args.outdir,
-            model=model,
-            max_steps=int(cfg.get("max_steps", args.max_steps)),
-            system_prompt=system_prompt,
-            compaction_cfg=cfg.get("compaction"),
-            memory_cfg=memory_cfg or None,
-            permissions_cfg=cfg.get("permissions"),
-            no_exec=args.no_exec,
-            hooks_cfg=cfg.get("hooks"),  # Gap 1: `hooks:` block in YAML
-            tasks_cfg=cfg.get("tasks"),  # Gap 2: `tasks:` block in YAML
-            accounting_cfg=cfg.get("accounting"),  # Gap 3: `accounting:` block
-            provider_cfg=provider_cfg,
-            model_policy=model_policy,
-        )
-    except ValueError as e:
-        # Config/CLI model or summarizer model violates the model policy.
-        sys.stderr.write(f"ERROR: {e}\n")
-        return 2
-    return loop.run()
+        mcp_cleanup = tools.bind_mcp(cfg.get("mcp"), cwd=os.getcwd())
+    except Exception as e:  # bug tak terduga di binding -> fail-open
+        sys.stderr.write(
+            "[mcp] warning: bind gagal ({}); lanjut tanpa MCP.\n".format(e))
+        mcp_cleanup = None
+    try:
+        try:
+            loop = ElieveLoop(
+                task=task,
+                outdir=outdir,
+                model=model,
+                max_steps=int(cfg.get("max_steps", args.max_steps)),
+                system_prompt=system_prompt,
+                compaction_cfg=cfg.get("compaction"),
+                memory_cfg=memory_cfg or None,
+                permissions_cfg=cfg.get("permissions"),
+                no_exec=args.no_exec,
+                hooks_cfg=cfg.get("hooks"),  # Gap 1: `hooks:` block in YAML
+                tasks_cfg=cfg.get("tasks"),  # Gap 2: `tasks:` block in YAML
+                accounting_cfg=cfg.get("accounting"),  # Gap 3: `accounting:` block
+                checkpoints_cfg=cfg.get("checkpoints"),  # Gap 4: `checkpoints:` block
+                resume_record=resume_record,  # Gap 4: --resume
+                provider_cfg=provider_cfg,
+                model_policy=model_policy,
+            )
+        except ValueError as e:
+            # Config/CLI model or summarizer model violates the model policy.
+            sys.stderr.write(f"ERROR: {e}\n")
+            return 2
+        return loop.run()
+    finally:
+        if mcp_cleanup is not None:
+            try:
+                mcp_cleanup()
+            except Exception as e:
+                sys.stderr.write(
+                    "[mcp] warning: cleanup gagal: {}\n".format(e))
 
 
 if __name__ == "__main__":

@@ -16,7 +16,7 @@ Desain:
   pipeline threshold. Dipakai TIGA lapis pertahanan (pilih yang paling
   bersih, tanpa metadata eksotis):
 
-  1. **Ringkasan di system prompt tiap turn.** HermesLoop menyuntik
+  1. **Ringkasan di system prompt tiap turn.** ElieveLoop menyuntik
      `summary()` (<300 char) sebagai blok "## Daftar task" di system
      prompt SEBELUM setiap panggilan model. System prompt masuk
      `prefix_len` yang TIDAK PERNAH disentuh compaction (Lapis 4).
@@ -24,7 +24,7 @@ Desain:
      task selalu segar walau riwayat tengah dipotong.
 
   2. **Hasil tool `task_update` dikecualikan dari pemotongan.**
-     `hermes/compaction.py` mengenali tool hasil lewat nama tool
+     `elieve/compaction.py` mengenali tool hasil lewat nama tool
      (`STATEFUL_TOOL_NAMES = {"task_update"}`): pesan `role: tool` dengan
      nama itu TIDAK PERNAH di-offload oleh micro_compact maupun di-mask
      oleh mask_observations. Hasil tool ini kecil (ringkasan mutasi),
@@ -42,7 +42,7 @@ import logging
 import os
 import tempfile
 
-log = logging.getLogger("hermes.tasks")
+log = logging.getLogger("elieve.tasks")
 
 STATUSES = ("pending", "in_progress", "completed")
 

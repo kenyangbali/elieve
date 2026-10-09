@@ -1,4 +1,4 @@
-# hermes-agent
+# elieve
 
 A modular Python AI-agent framework: a ReAct loop with function calling,
 sandboxed tools, and a production-hardened harness for long autonomous
@@ -7,31 +7,31 @@ completions API**.
 
 ## Features
 
-- **ReAct loop** (`hermes/loop.py`) — think → act → observe with tool
+- **ReAct loop** (`elieve/loop.py`) — think → act → observe with tool
   calls, step cap, and resumable runs (`progress.json` per run).
-- **Sandboxed tools** (`hermes/tools/`) — `read_file`, `search`,
+- **Sandboxed tools** (`elieve/tools/`) — `read_file`, `search`,
   `exec`, plus `remember`/`task_update` memory & task tools. Tools are
   confined to a configurable workspace root; destructive command
   patterns are blocked by default.
-- **Context compaction** (`hermes/compaction.py`) — multi-layer
+- **Context compaction** (`elieve/compaction.py`) — multi-layer
   compression (micro-compaction per turn, threshold full compaction)
   that keeps prompt-cache prefixes stable to cut token cost on long
   sessions.
-- **Cross-session memory** (`hermes/memory.py`) — a `MEMORY.md` per
+- **Cross-session memory** (`elieve/memory.py`) — a `MEMORY.md` per
   outdir with `remember`/`recall`, plus `autoDream` periodic cleanup
   (`--tidy`).
-- **2-stage permission gate** (`hermes/permissions.py`) — optional,
+- **2-stage permission gate** (`elieve/permissions.py`) — optional,
   pluggable classifier (fast yes/no stage + reasoning stage) with a
   fail-closed regex layer underneath when the classifier is off.
-- **Multi-agent orchestrator** (`hermes/orchestrator.py`) — optional
+- **Multi-agent orchestrator** (`elieve/orchestrator.py`) — optional
   manager/worker mode: one planner spawns parallel workers (max depth
   1) with restricted toolsets, then merges their reports.
-- **Lifecycle hooks** (`hermes/hooks.py`) — deterministic events the
+- **Lifecycle hooks** (`elieve/hooks.py`) — deterministic events the
   model can't skip: `PreToolUse`, `PostToolUse`, `PreCompact`,
   `PostCompact`, `OnStop`, `OnError`.
-- **Task tracking** (`hermes/tasks.py`) — structured per-run checklists
+- **Task tracking** (`elieve/tasks.py`) — structured per-run checklists
   (`tasks.json`) with a `task_update` tool, surviving compaction.
-- **Token/cost accounting** (`hermes/accounting.py`) — per-model usage
+- **Token/cost accounting** (`elieve/accounting.py`) — per-model usage
   totals (`usage.json`), context-window warnings, and configurable
   run cost caps.
 
@@ -40,15 +40,15 @@ completions API**.
 ### Install
 
 ```bash
-git clone https://github.com/kenyangbali/hermes-agent.git
-cd hermes-agent
+git clone https://github.com/kenyangbali/elieve.git
+cd elieve
 pip install -e .
 ```
 
 Or install directly from git:
 
 ```bash
-pip install git+https://github.com/kenyangbali/hermes-agent.git
+pip install git+https://github.com/kenyangbali/elieve.git
 ```
 
 ### Configure the API key
@@ -63,16 +63,16 @@ files.
 
 ### Run
 
-The `pip install` step registers a `hermes` console entry point:
+The `pip install` step registers a `elieve` console entry point:
 
 ```bash
-hermes --task "Summarize the README of ./workspace/demo" --outdir ./run-1
+elieve --task "Summarize the README of ./workspace/demo" --outdir ./run-1
 ```
 
 Without installing (repo checkout), the equivalent module invocation:
 
 ```bash
-python3 -m hermes.loop --task "Summarize the README of ./workspace/demo" --outdir ./run-1
+python3 -m elieve.loop --task "Summarize the README of ./workspace/demo" --outdir ./run-1
 ```
 
 Each run writes `OUT.md` (final report) and `progress.json`
@@ -81,7 +81,7 @@ Each run writes `OUT.md` (final report) and `progress.json`
 ### Custom provider via config
 
 ```bash
-hermes --config configs/example.yaml --task "..." --outdir ./run-1
+elieve --config configs/example.yaml --task "..." --outdir ./run-1
 ```
 
 Minimal `example.yaml` (see `configs/example.yaml` for all blocks):
@@ -125,7 +125,7 @@ Runs the full unit suite (no network/API key needed).
 ### CLI reference
 
 ```
-hermes --task TASK --outdir OUTDIR [--model MODEL] [--max-steps MAX_STEPS]
+elieve --task TASK --outdir OUTDIR [--model MODEL] [--max-steps MAX_STEPS]
        [--config CONFIG] [--system-prompt SYSTEM_PROMPT] [--workspace WORKSPACE]
        [--lang {en,id}] [--tidy] [--no-exec]
 ```

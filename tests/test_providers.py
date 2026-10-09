@@ -1,4 +1,4 @@
-"""Tests for hermes.providers (Area D: GLOBALIZED test work).
+"""Tests for elieve.providers (Area D: GLOBALIZED test work).
 
 Covers: env key resolution (incl. no key material in errors), custom
 base_url actually being used for the request URL (HTTP layer mocked),
@@ -23,8 +23,8 @@ if REPO_ROOT not in sys.path:
 
 import yaml
 
-from hermes import providers
-from hermes.providers import (
+from elieve import providers
+from elieve.providers import (
     ProviderConfig,
     ProviderError,
     ProviderKeyError,
@@ -32,7 +32,7 @@ from hermes.providers import (
     post_chat_completions,
     resolve_api_key,
 )
-from hermes import tools as _tools
+from elieve import tools as _tools
 
 DUMMY_KEY = "sk-test-dummy-key-not-real-00000000"
 
@@ -42,7 +42,7 @@ DUMMY_KEY = "sk-test-dummy-key-not-real-00000000"
 
 
 class TestEnvKeyResolution(unittest.TestCase):
-    VAR = "HERMES_TEST_API_KEY_D"
+    VAR = "ELIEVE_TEST_API_KEY_D"
 
     def setUp(self):
         os.environ.pop(self.VAR, None)
@@ -78,10 +78,10 @@ class TestEnvKeyResolution(unittest.TestCase):
 
     def test_error_message_never_leaks_key_even_when_set(self):
         # A different (set) env var must not appear in any error text.
-        os.environ["HERMES_TEST_OTHER_D"] = DUMMY_KEY
-        self.addCleanup(os.environ.pop, "HERMES_TEST_OTHER_D", None)
+        os.environ["ELIEVE_TEST_OTHER_D"] = DUMMY_KEY
+        self.addCleanup(os.environ.pop, "ELIEVE_TEST_OTHER_D", None)
         cfg = ProviderConfig(base_url="http://x/v1",
-                             api_key_env="HERMES_TEST_UNSET_D")
+                             api_key_env="ELIEVE_TEST_UNSET_D")
         with self.assertRaises(ProviderKeyError) as cm:
             resolve_api_key(cfg)
         self.assertNotIn(DUMMY_KEY, str(cm.exception))
@@ -103,7 +103,7 @@ class TestBaseUrlUsed(unittest.TestCase):
             return 200, '{"choices": []}'
 
         cfg = ProviderConfig(base_url="http://127.0.0.1:9999/v1",
-                             api_key_env="HERMES_UNUSED_D")
+                             api_key_env="ELIEVE_UNUSED_D")
         with mock.patch.object(providers, "_post_json_requests", fake_post):
             post_chat_completions(cfg, {"model": "m"}, api_key=DUMMY_KEY)
         self.assertEqual(seen["url"],
@@ -120,7 +120,7 @@ class TestBaseUrlUsed(unittest.TestCase):
             return 200, "{}"
 
         cfg = ProviderConfig(base_url="https://example.com/v1/",
-                             api_key_env="HERMES_UNUSED_D")
+                             api_key_env="ELIEVE_UNUSED_D")
         with mock.patch.object(providers, "_post_json_requests", fake_post):
             post_chat_completions(cfg, {}, api_key=DUMMY_KEY)
         self.assertEqual(seen["url"],
@@ -128,7 +128,7 @@ class TestBaseUrlUsed(unittest.TestCase):
         self.assertNotIn("//chat", seen["url"].split("://", 1)[1])
 
     def test_missing_base_url_raises(self):
-        cfg = ProviderConfig(api_key_env="HERMES_UNUSED_D")
+        cfg = ProviderConfig(api_key_env="ELIEVE_UNUSED_D")
         with mock.patch.object(providers, "_post_json_requests") as fake:
             with self.assertRaises(ProviderError):
                 post_chat_completions(cfg, {}, api_key=DUMMY_KEY)
@@ -192,7 +192,7 @@ class TestModelPolicy(unittest.TestCase):
 
 def _make_temp_9router_db(key_value=None):
     """Create a temp sqlite DB with an apiKeys table; return its path."""
-    fd, path = tempfile.mkstemp(prefix="hermes-test-9router-", suffix=".sqlite")
+    fd, path = tempfile.mkstemp(prefix="elieve-test-9router-", suffix=".sqlite")
     os.close(fd)
     con = sqlite3.connect(path)
     try:
@@ -228,7 +228,7 @@ class TestNineRouterKeyProvider(unittest.TestCase):
     def test_unreadable_db_clear_error(self):
         cfg = ProviderConfig(base_url="http://x/v1", key_provider="9router")
         with mock.patch.object(providers, "NINE_ROUTER_DB",
-                               "/nonexistent/hermes-test-9router.sqlite"):
+                               "/nonexistent/elieve-test-9router.sqlite"):
             with self.assertRaises(ProviderKeyError):
                 resolve_api_key(cfg)
 
@@ -301,13 +301,13 @@ class TestConfigs(unittest.TestCase):
 
 
 class TestLoopModelWiring(unittest.TestCase):
-    """HermesLoop requires an explicit model and validates it against the
+    """ElieveLoop requires an explicit model and validates it against the
     explicit model_policy; violations raise ValueError (not SystemExit)."""
 
     def setUp(self):
-        self.var = "HERMES_LOOP_TEST_KEY_D"
+        self.var = "ELIEVE_LOOP_TEST_KEY_D"
         os.environ[self.var] = DUMMY_KEY
-        self.tmpdir = tempfile.mkdtemp(prefix="hermes-loop-test-")
+        self.tmpdir = tempfile.mkdtemp(prefix="elieve-loop-test-")
 
     def tearDown(self):
         os.environ.pop(self.var, None)
@@ -315,10 +315,10 @@ class TestLoopModelWiring(unittest.TestCase):
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     def _make_loop(self, **kw):
-        from hermes.loop import HermesLoop
+        from elieve.loop import ElieveLoop
         provider_cfg = kw.pop("provider_cfg", None) or ProviderConfig(
             base_url="http://127.0.0.1:9999/v1", api_key_env=self.var)
-        return HermesLoop(task="t", outdir=self.tmpdir,
+        return ElieveLoop(task="t", outdir=self.tmpdir,
                           provider_cfg=provider_cfg, **kw)
 
     def test_allowed_model_accepted(self):
@@ -349,7 +349,7 @@ class TestLoopModelWiring(unittest.TestCase):
         # Area-A decision: call_model(messages, model, provider_cfg,
         # api_key=None, tools=None) returns (message, usage).
         import inspect
-        from hermes.loop import call_model
+        from elieve.loop import call_model
         sig = inspect.signature(call_model)
         self.assertEqual(list(sig.parameters),
                          ["messages", "model", "provider_cfg", "api_key",
@@ -371,16 +371,16 @@ class TestWorkspaceRootParity(unittest.TestCase):
     def test_default_root_is_cwd_dot_workspace_absolute(self):
         # No config: the tools default is abspath("./workspace") computed at
         # import time from the process cwd. A subprocess is used on purpose:
-        # importlib.reload() of hermes.tools inside this process would
+        # importlib.reload() of elieve.tools inside this process would
         # recreate module-level names (ToolError, ...) and break identity
         # checks (assertRaises) in other test modules.
         import subprocess
-        with tempfile.TemporaryDirectory(prefix="hermes-root-test-") as td:
+        with tempfile.TemporaryDirectory(prefix="elieve-root-test-") as td:
             out = subprocess.run(
                 [sys.executable, "-c",
                  "import os, sys; "
                  "sys.path.insert(0, %r); "
-                 "import hermes.tools as t; "
+                 "import elieve.tools as t; "
                  "print(t.get_workspace_root())" % REPO_ROOT],
                 cwd=td, capture_output=True, text=True, timeout=60)
             self.assertEqual(out.returncode, 0, out.stderr)
@@ -388,7 +388,7 @@ class TestWorkspaceRootParity(unittest.TestCase):
                              os.path.abspath(os.path.join(td, "workspace")))
 
     def test_configure_roots_stores_absolute(self):
-        with tempfile.TemporaryDirectory(prefix="hermes-root-test-") as td:
+        with tempfile.TemporaryDirectory(prefix="elieve-root-test-") as td:
             rel = os.path.join(td, "sub")
             got = _tools.configure_roots(rel)
             self.assertTrue(os.path.isabs(got))
@@ -396,14 +396,14 @@ class TestWorkspaceRootParity(unittest.TestCase):
             self.assertEqual(_tools.get_workspace_root(), got)
 
     def test_resolve_rejects_outside_root(self):
-        with tempfile.TemporaryDirectory(prefix="hermes-root-test-") as td:
+        with tempfile.TemporaryDirectory(prefix="elieve-root-test-") as td:
             _tools.configure_roots(td)
             # inside root: fine
             inside = os.path.join(td, "file.txt")
             self.assertEqual(_tools._resolve(inside),
                              os.path.realpath(inside))
             # /tmp: always allowed as a second root
-            tmpfile = os.path.join(tempfile.gettempdir(), "hermes-ok.txt")
+            tmpfile = os.path.join(tempfile.gettempdir(), "elieve-ok.txt")
             self.assertEqual(_tools._resolve(tmpfile),
                              os.path.realpath(tmpfile))
             # elsewhere: rejected (same behavior as configure_roots parity)
@@ -418,7 +418,7 @@ class TestWorkspaceRootParity(unittest.TestCase):
         base = "/var/tmp"
         if not (os.path.isdir(base) and os.access(base, os.W_OK)):
             self.skipTest("/var/tmp not writable in this environment")
-        outer = tempfile.mkdtemp(prefix="hermes-root-test-", dir=base)
+        outer = tempfile.mkdtemp(prefix="elieve-root-test-", dir=base)
         import shutil
         self.addCleanup(shutil.rmtree, outer, True)
         root = os.path.join(outer, "root")

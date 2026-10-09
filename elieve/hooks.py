@@ -2,7 +2,7 @@
 """Gap 1 (docs/GAP-AUDIT.md G1) — hook lifecycle system.
 
 Claude Code punya 30+ event hook berisi perintah deterministik yang
-**tidak bisa di-skip model**. Hermes punya modul ini sebagai jawabannya.
+**tidak bisa di-skip model**. Elieve punya modul ini sebagai jawabannya.
 
 Event deterministik:
   PreToolUse   — sebelum tool dijalankan (SEBELUM permission gate).
@@ -24,7 +24,7 @@ Definisi hook via YAML (blok `hooks:`):
 Tiap aksi EITHER:
   - {action: "nama"}      -> callable python terdaftar di HOOK_ACTIONS
   - {shell: "cmd ..."}    -> perintah shell, timeout default 15 dtk,
-                             env HERMES_EVENT / HERMES_OUTDIR / HERMES_STEP.
+                             env ELIEVE_EVENT / ELIEVE_OUTDIR / ELIEVE_STEP.
                              Opsional: {timeout: 5, blocking: true}.
 
 Kontrak kegagalan (dipakai semua event):
@@ -50,7 +50,7 @@ import subprocess
 import tempfile
 from datetime import datetime, timezone
 
-log = logging.getLogger("hermes.hooks")
+log = logging.getLogger("elieve.hooks")
 
 EVENTS = ("PreToolUse", "PostToolUse", "PreCompact",
           "PostCompact", "OnStop", "OnError")
@@ -66,7 +66,7 @@ def _utcnow():
 def _outdir_of(ctx, fallback):
     d = (ctx or {}).get("outdir") or fallback
     if not d:
-        d = os.path.join(tempfile.gettempdir(), "hermes-hooks")
+        d = os.path.join(tempfile.gettempdir(), "elieve-hooks")
     try:
         os.makedirs(d, exist_ok=True)
     except OSError:
@@ -303,9 +303,9 @@ class HookRunner:
     def _run_shell(self, cmd, ctx, event, timeout):
         """Jalankan shell hook; return dict hasil (tidak pernah raise)."""
         env = dict(os.environ)
-        env["HERMES_EVENT"] = event
-        env["HERMES_OUTDIR"] = _outdir_of(ctx, self.outdir)
-        env["HERMES_STEP"] = str((ctx or {}).get("step", 0))
+        env["ELIEVE_EVENT"] = event
+        env["ELIEVE_OUTDIR"] = _outdir_of(ctx, self.outdir)
+        env["ELIEVE_STEP"] = str((ctx or {}).get("step", 0))
         try:
             p = subprocess.run(
                 cmd, shell=True, capture_output=True, text=True,

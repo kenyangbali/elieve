@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""hermes.accounting — Gap 3: akuntansi token & estimasi biaya per run.
+"""elieve.accounting — Gap 3: akuntansi token & estimasi biaya per run.
 
 - UsageTracker : akumulasi prompt/completion/total tokens per model per run.
 - Estimasi biaya: tabel harga USD per 1K token dari blok `accounting:` di
@@ -13,7 +13,7 @@
   - run_cost_cap (USD, default 0 = nonaktif): bila estimasi biaya run
     mencapai cap -> loop berhenti rapi (status cost_capped), bukan crash.
 
-API key tidak disentuh modul ini (baca key tetap di hermes/loop.py).
+API key tidak disentuh modul ini (baca key tetap di elieve/loop.py).
 """
 
 import json

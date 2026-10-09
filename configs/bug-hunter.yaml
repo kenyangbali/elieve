@@ -1,4 +1,4 @@
-# Profil bug-hunter — dipakai via: python3 -m hermes.loop --config configs/bug-hunter.yaml --task "..." --outdir ...
+# Profil bug-hunter — dipakai via: python3 -m elieve.loop --config configs/bug-hunter.yaml --task "..." --outdir ...
 # Nilai di sini menjadi default; flag CLI (--model, --max-steps) menimpa bila diisi.
 
 model: ag/claude-opus-4-6-thinking   # audit berat (default)
@@ -7,7 +7,7 @@ model: ag/claude-opus-4-6-thinking   # audit berat (default)
 
 max_steps: 40
 
-# Provider: OpenAI-compatible endpoint + key source (hermes/providers.py).
+# Provider: OpenAI-compatible endpoint + key source (elieve/providers.py).
 # What used to be personal hardcode (127.0.0.1:20128, the 9router sqlite key,
 # ag/*-only models) is now plain configuration — swap this block to use any
 # other provider (see configs/example.yaml).
@@ -31,7 +31,7 @@ workspace_root: /home/hatch/workspace
 # Default system-prompt language: en | id ('system_prompt' below still overrides).
 language: id
 
-# Tool yang boleh dipakai profil ini (subset dari hermes/tools).
+# Tool yang boleh dipakai profil ini (subset dari elieve/tools).
 tools:
   - read_file
   - list_dir
@@ -85,7 +85,7 @@ permissions:
   kilat_timeout_s: 10         # timeout singkat tahap 1
   max_consecutive_failures: 3 # auto-disable classifier setelah N gagal beruntun
 
-# Gap 1 — hook lifecycle system (docs/HOOKS.md, hermes/hooks.py).
+# Gap 1 — hook lifecycle system (docs/HOOKS.md, elieve/hooks.py).
 # Event deterministik yang tidak bisa di-skip model. Tiap aksi EITHER
 # {action: nama_terdaftar} OR {shell: cmd, timeout: detik, blocking: bool}.
 hooks:
@@ -98,7 +98,7 @@ hooks:
   OnStop:
     - {action: "persist_state"}           # persist state di semua jalur keluar
 
-# Gap 2 — structured task tracking (hermes/tasks.py, docs/TASKS.md).
+# Gap 2 — structured task tracking (elieve/tasks.py, docs/TASKS.md).
 # Checklist per-run: tool task_update (add/set/list), persist otomatis ke
 # <outdir>/tasks.json, ringkasan "## Daftar task" disuntik ke system
 # prompt tiap turn (<300 char, survive compaction).
@@ -107,7 +107,7 @@ tasks:
   max_tasks: 64            # add() di atas batas ditolak
   summary_max_chars: 300   # batas ringkasan di system prompt
 
-# Gap 3 — akuntansi token & estimasi biaya (hermes/accounting.py).
+# Gap 3 — akuntansi token & estimasi biaya (elieve/accounting.py).
 # Harga = USD per 1K token. Nilai di bawah = PLACEHOLDER —
 # sesuaikan dengan harga aktual provider sebelum dipakai untuk budgeting.
 accounting:
@@ -118,6 +118,33 @@ accounting:
     ag/gemini-3-flash: {input_per_1k: 0.0005, output_per_1k: 0.002}
   run_cost_cap: 0.0        # USD; 0 = nonaktif. Bila tercapai -> stop rapi (status cost_capped, return 0)
   context_warn_pct: 80     # warning saat prompt_tokens >= N% dari compaction.context_limit
+
+# Gap 4 — checkpoints / resume percakapan (elieve/checkpoints.py).
+# Snapshot messages + ringkasan state (usage, tasks) ke
+# <outdir>/checkpoints/ckpt-<step>.json (tulis atomik). Lanjutkan run
+# dengan: python3 -m elieve.loop --resume <outdir> [--task ...]
+checkpoints:
+  enabled: true
+  every_n_steps: 10   # snapshot periodik tiap N step; plus snapshot paksa
+                      # sebelum compaction memampatkan konteks (PreCompact)
+
+# Gap 5 — MCP client (elieve/mcp.py, docs/MCP.md).
+# Opsional: tanpa blok ini (dan tanpa .mcp.json di cwd) loop jalan persis
+# seperti biasa. Tiap tool server terekspos sebagai mcp__<server>__<tool>.
+# Server stdio: {name, command, args}; server HTTP: {name, url}
+# (transport default streamable-http; "sse" untuk legacy SSE).
+# File .mcp.json di cwd (format {"mcpServers": {...}} ala Claude Code)
+# juga dibaca; YAML menang bila nama tabrakan.
+mcp:
+  enabled: true
+  timeout_s: 30          # timeout per operasi MCP (initialize/list/call)
+  servers: []            # contoh:
+    # - name: playwright
+    #   command: npx
+    #   args: ["-y", "@modelcontextprotocol/server-playwright"]
+    # - name: api-internal
+    #   url: http://127.0.0.1:8000/mcp
+    #   transport: streamable-http   # atau "sse"
 
 # Fase 4 — multi-agent orchestration (docs/ARCHITECTURE.md §4).
 # OPSIONAL & PLUGGABLE ("by choose", keputusan Bayu 2026-10-09):
@@ -136,3 +163,13 @@ orchestrator:
   worker_readonly_default: false  # default toolset worker (bisa di-override mandor per subtask)
   plan_timeout_s: 120          # timeout planning mandor
   worker_timeout_s: 1800       # timeout tiap worker subprocess
+  plan_first: false            # Gap 6: recon gate — true = fase plan read-only
+                               # (tulis PLAN.md) SEBELUM worker mahal di-spawn
+  plan_model: ""               # model fase recon; kosong = worker_model
+
+# Gap 6 — Plan mode (CLI --plan): riset read-only (exec dipaksa mati),
+# tulis <outdir>/PLAN.md dari jawaban akhir, lalu berhenti (exit 0).
+# plan_model kosong = pakai model utama. Tanpa blok ini: default aman.
+plan:
+  plan_model: ""             # mis. ag/gemini-3-flash ; kosong = model utama
+  max_steps: 30              # budget step fase riset

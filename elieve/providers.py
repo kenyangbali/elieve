@@ -1,4 +1,4 @@
-"""hermes.providers — OpenAI-compatible provider abstraction.
+"""elieve.providers — OpenAI-compatible provider abstraction.
 
 A ProviderConfig describes *where* and *how* to call a chat-completions
 endpoint. It never carries a raw secret: API keys are resolved at runtime,

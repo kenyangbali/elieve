@@ -1,6 +1,6 @@
 """Phase 2 — MEMORY.md + autoDream (full implementation).
 
-Problem: every Hermes session starts from zero; lessons from previous
+Problem: every Elieve session starts from zero; lessons from previous
 runs are lost.
 
 Design (docs/ARCHITECTURE.md §2):

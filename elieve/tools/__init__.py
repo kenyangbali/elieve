@@ -1,4 +1,4 @@
-"""hermes.tools — sandboxed primitive tools.
+"""elieve.tools — sandboxed primitive tools.
 
 Pattern: a small toolset (~6 capabilities) inside a tight sandbox.
 Every tool raises ToolError on out-of-policy input — the main loop
@@ -78,6 +78,7 @@ from .memory import remember, REMEMBER_SCHEMAS, bind_memory, unbind_memory  # no
 from .tasks import (  # noqa: E402
     task_update, TASK_SCHEMAS, bind_tasks, unbind_tasks,
 )
+from ..mcp import bind_mcp, unbind_mcp  # noqa: E402  (Gap 5: MCP client)
 
 DISPATCH = {
     "read_file": read_file,
@@ -112,4 +113,6 @@ __all__ = [
     "unbind_memory",
     "bind_tasks",
     "unbind_tasks",
+    "bind_mcp",
+    "unbind_mcp",
 ]

@@ -2,7 +2,7 @@
 
 Jalan tanpa 9router / API key / network (plan_fn & spawn_fn palsu;
 get_api_key di-mock untuk integrasi loop):
-    cd ~/workspace/hermes-agent && python3 -m unittest discover -s tests
+    cd ~/workspace/elieve && python3 -m unittest discover -s tests
 """
 
 import json
@@ -14,14 +14,14 @@ from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from hermes.orchestrator import (  # noqa: E402
+from elieve.orchestrator import (  # noqa: E402
     Orchestrator,
     OrchestratorError,
     WORKER_ENV_FLAG,
     is_orchestrator_active,
 )
-from hermes.providers import ProviderConfig  # noqa: E402
-import hermes.loop as LOOP  # noqa: E402
+from elieve.providers import ProviderConfig  # noqa: E402
+import elieve.loop as LOOP  # noqa: E402
 
 # Policy equivalent of the old hardcoded "ag/* only" planner rule.
 POLICY = {"allow": ["ag/*"], "forbid": ["bns/*", "oc/*"]}
@@ -30,7 +30,7 @@ POLICY = {"allow": ["ag/*"], "forbid": ["bns/*", "oc/*"]}
 def make_provider(**kw):
     params = dict(
         base_url="http://127.0.0.1:1/v1",
-        api_key_env="HERMES_TEST_ORCH_KEY",
+        api_key_env="ELIEVE_TEST_ORCH_KEY",
         model="ag/gemini-3-flash",
     )
     params.update(kw)
@@ -184,7 +184,7 @@ class SpawnMergeTest(unittest.TestCase):
     def _spawn_ok(self, index, subtask, worker_outdir):
         os.makedirs(worker_outdir, exist_ok=True)
         with open(os.path.join(worker_outdir, "OUT.md"), "w") as f:
-            f.write("# Hermes — hasil\n\n- Task: x\n\n---\n\n## temuan w%d\n"
+            f.write("# Elieve — hasil\n\n- Task: x\n\n---\n\n## temuan w%d\n"
                     % index)
         return {"index": index, "title": subtask["title"], "status": "done",
                 "outdir": worker_outdir, "returncode": 0, "note": "",
@@ -283,7 +283,7 @@ class FromConfigTest(unittest.TestCase):
 class NoExecTest(unittest.TestCase):
     def _loop(self, **kw):
         with mock.patch.object(LOOP, "get_api_key", return_value="k"):
-            loop = LOOP.HermesLoop(
+            loop = LOOP.ElieveLoop(
                 task="t", outdir=tempfile.mkdtemp(),
                 model="ag/gemini-3-flash", **kw)
         return loop
