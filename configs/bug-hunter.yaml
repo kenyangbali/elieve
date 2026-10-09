@@ -44,3 +44,19 @@ memory:
   tidy_every_runs: 5          # autoDream tiap N run (counter di <outdir>/.memory_counter)
   max_fact_chars: 150         # butir lebih panjang dipotong cerdas di batas kata
   summarizer_model: ag/gemini-3-flash  # murah; bns/*/oc/* DITOLAK di kode
+
+# Fase 3 — permission gate 2 tahap (docs/ARCHITECTURE.md §3).
+# Classifier OPSIONAL & PLUGGABLE ("by choose", keputusan Bayu 2026-10-09):
+#   - classifier_model KOSONG  -> classifier OFF total (hanya regex lapisan-0)
+#   - classifier_model DIISI   -> classifier ON (tahap 1 kilat via model itu)
+#   - model MATI (timeout/error) -> fallback lapisan-0 per-call; auto-disable
+#     setelah max_consecutive_failures gagal beruntun (run tidak crash).
+# API key custom HANYA via env var (classifier_api_key_env = NAMA env var).
+permissions:
+  enabled: true
+  classifier_model: ""        # mis. ag/gemini-3-flash ; kosong = OFF
+  classifier_api_base: ""     # kosong = 9router lokal; isi URL OpenAI-compatible custom
+  classifier_api_key_env: ""  # NAMA env var berisi key custom (tak pernah di-hardcode)
+  kilat_max_tokens: 32        # verdict kilat <64 token
+  kilat_timeout_s: 10         # timeout singkat tahap 1
+  max_consecutive_failures: 3 # auto-disable classifier setelah N gagal beruntun

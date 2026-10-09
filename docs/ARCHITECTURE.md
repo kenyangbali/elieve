@@ -80,6 +80,12 @@ variasi penulisan.
 - Semua verdict dicatat ke audit log (tool, argumen ringkas, verdict).
 - Regex v1 tetap sebagai **lapisan 0 fail-closed** bila classifier
   tidak terjangkau.
+- **Opsional & pluggable** (keputusan Bayu 2026-10-09): classifier aktif
+  hanya bila `classifier_model` diisi di config (**auto-on**); kosong =
+  **auto-off** (regex lapisan 0 saja). API custom via `classifier_api_base`
+  + key dari env var (`classifier_api_key_env`). Model mati (timeout/error)
+  -> fallback lapisan 0 per-call, auto-disable setelah 3 gagal beruntun.
+  Run tidak pernah crash gara-gara classifier.
 
 ## 4. Multi-Agent Orchestration (Fase 4) — `hermes/orchestrator.py`
 

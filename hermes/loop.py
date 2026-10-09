@@ -29,6 +29,7 @@ import time
 from datetime import datetime, timezone
 
 from .tools import DISPATCH, TOOL_SCHEMAS, ToolError, bind_memory, unbind_memory
+from .permissions import PermissionGate
 from .memory import (
     AgentMemory,
     DEFAULT_MAX_FACT_CHARS,
@@ -222,7 +223,7 @@ class HermesLoop:
 
     def __init__(self, task, outdir, model=DEFAULT_MODEL, max_steps=40,
                  system_prompt=SYSTEM_PROMPT, compaction_cfg=None,
-                 memory_cfg=None):
+                 memory_cfg=None, permissions_cfg=None):
         self.task = task
         self.outdir = outdir
         self.model = validate_model(model)
@@ -255,6 +256,25 @@ class HermesLoop:
             self.memory_cfg.update(memory_cfg)
         _validate_compaction_model(self.memory_cfg["summarizer_model"])
         self.memory = None  # AgentMemory dibuat di run() (butuh outdir)
+        # Konfigurasi permission gate (Fase 3). Classifier OPSIONAL:
+        # classifier_model kosong -> auto-off (hanya regex lapisan-0).
+        self.permissions = {
+            "enabled": True,
+            "classifier_model": "",
+            "classifier_api_base": "",
+            "classifier_api_key_env": "",
+            "kilat_max_tokens": 32,
+            "kilat_timeout_s": 10,
+            "max_consecutive_failures": 3,
+        }
+        if permissions_cfg:
+            self.permissions.update(permissions_cfg)
+        self.gate = PermissionGate(
+            cfg=self.permissions,
+            deep_model=self.model,
+            main_api_key=self.api_key,
+            audit_path=os.path.join(outdir, "permission_audit.jsonl"),
+        )
         if self.model not in ALLOWED_MODELS:
             print(
                 f"[hermes] peringatan: '{self.model}' bukan daftar dikenal; "
@@ -291,6 +311,25 @@ class HermesLoop:
             return f"TOOL DITOLAK: {e}"
         except Exception as e:
             return f"tool error ({name}): {e}"
+
+    def _gated_tool(self, name, args):
+        """Tool call lewat permission gate (Fase 3) SEBELUM dieksekusi.
+
+        Kembalikan (allowed, result_text). verdict deny/ask -> tool TIDAK
+        dijalankan; model diberi pesan penolakan dan loop lanjut normal
+        (tidak crash).
+        """
+        verdict, reason = self.gate.check(name, args or {})
+        if verdict == "deny":
+            print(f"[hermes]   gate: DENY {name}: {reason[:120]}", flush=True)
+            return False, f"IZIN DITOLAK oleh permission gate: {reason}"
+        if verdict == "ask":
+            print(f"[hermes]   gate: ASK {name}: {reason[:120]}", flush=True)
+            return False, (
+                "IZIN DITOLAK oleh permission gate (butuh konfirmasi manusia; "
+                f"loop non-interaktif): {reason}"
+            )
+        return True, self._run_tool(name, args)
 
     # -- compaction (Fase 1) ------------------------------------------
 
@@ -464,7 +503,7 @@ class HermesLoop:
                             f"[hermes]   tool: {name} {str(args)[:120]}",
                             flush=True,
                         )
-                        result = self._run_tool(name, args)
+                        _allowed, result = self._gated_tool(name, args)
                     messages.append(
                         {
                             "role": "tool",
@@ -483,7 +522,7 @@ class HermesLoop:
             if fb:
                 name, args = fb
                 print(f"[hermes]   tool (fallback): {name}", flush=True)
-                result = self._run_tool(name, args)
+                _allowed, result = self._gated_tool(name, args)
                 messages.append(
                     {
                         "role": "user",
@@ -577,6 +616,7 @@ def main(argv=None) -> int:
         system_prompt=args.system_prompt or cfg.get("system_prompt", SYSTEM_PROMPT),
         compaction_cfg=cfg.get("compaction"),
         memory_cfg=memory_cfg or None,
+        permissions_cfg=cfg.get("permissions"),
     )
     return loop.run()
 
