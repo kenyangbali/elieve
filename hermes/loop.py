@@ -28,7 +28,13 @@ import sys
 import time
 from datetime import datetime, timezone
 
-from .tools import DISPATCH, TOOL_SCHEMAS, ToolError
+from .tools import DISPATCH, TOOL_SCHEMAS, ToolError, bind_memory, unbind_memory
+from .memory import (
+    AgentMemory,
+    DEFAULT_MAX_FACT_CHARS,
+    DEFAULT_SUMMARIZER_MODEL as MEMORY_SUMMARIZER_MODEL,
+    DEFAULT_TIDY_EVERY_RUNS,
+)
 from .compaction import (
     DEFAULT_CONTEXT_LIMIT,
     DEFAULT_KEEP_RECENT,
@@ -67,7 +73,9 @@ ATURAN KERAS (melanggar = gagal):
 5. Jika ragu apakah sesuatu bug atau bukan, catat sebagai "perlu verifikasi", jangan dipaksakan jadi temuan.
 
 CARA KERJA:
-- Gunakan function call yang tersedia: read_file, list_dir, grep, exec.
+- Gunakan function call yang tersedia: read_file, list_dir, grep, exec, remember.
+- Tool `remember`: simpan pelajaran/pola penting ke ingatan sesi (MEMORY.md).
+  JANGAN PERNAH simpan API key, token, password, atau kredensial apa pun.
 - Setelah semua bukti terkumpul (atau tidak ada temuan), BERHENTI memanggil tool dan tulis LAPORAN AKHIR sebagai jawaban teks biasa — itu yang akan disimpan sebagai hasil.
 - Format laporan akhir:
   ## <judul temuan>
@@ -213,7 +221,8 @@ class HermesLoop:
     """Satu sesi ReAct: kirim task, iterasi tool call sampai jawaban akhir."""
 
     def __init__(self, task, outdir, model=DEFAULT_MODEL, max_steps=40,
-                 system_prompt=SYSTEM_PROMPT, compaction_cfg=None):
+                 system_prompt=SYSTEM_PROMPT, compaction_cfg=None,
+                 memory_cfg=None):
         self.task = task
         self.outdir = outdir
         self.model = validate_model(model)
@@ -235,6 +244,17 @@ class HermesLoop:
             self.compaction.update(compaction_cfg)
         # validasi awal: summarizer wajib ag/* (bns/*/oc/* ditolak di kode)
         _validate_compaction_model(self.compaction["summarizer_model"])
+        # Konfigurasi memory (Fase 2).
+        self.memory_cfg = {
+            "enabled": True,
+            "tidy_every_runs": DEFAULT_TIDY_EVERY_RUNS,
+            "max_fact_chars": DEFAULT_MAX_FACT_CHARS,
+            "summarizer_model": MEMORY_SUMMARIZER_MODEL,
+        }
+        if memory_cfg:
+            self.memory_cfg.update(memory_cfg)
+        _validate_compaction_model(self.memory_cfg["summarizer_model"])
+        self.memory = None  # AgentMemory dibuat di run() (butuh outdir)
         if self.model not in ALLOWED_MODELS:
             print(
                 f"[hermes] peringatan: '{self.model}' bukan daftar dikenal; "
@@ -308,12 +328,64 @@ class HermesLoop:
         )
         return out, actions
 
+    # -- memory (Fase 2) --------------------------------------------------
+
+    def _memory_path(self):
+        return os.path.join(self.outdir, "MEMORY.md")
+
+    def _memory_counter_path(self):
+        return os.path.join(self.outdir, ".memory_counter")
+
+    def _setup_memory(self):
+        """Buat/bind AgentMemory, autoDream tiap N run, recall konteks."""
+        if not self.memory_cfg.get("enabled", True):
+            unbind_memory()
+            return ""
+        self.memory = AgentMemory(
+            self._memory_path(),
+            max_fact_chars=int(self.memory_cfg["max_fact_chars"]),
+        )
+        bind_memory(self.memory)
+        # autoDream: counter per outdir; tidy tiap N run.
+        counter = 0
+        cpath = self._memory_counter_path()
+        try:
+            with open(cpath) as f:
+                counter = int((f.read() or "0").strip() or 0)
+        except (OSError, ValueError):
+            counter = 0
+        counter += 1
+        try:
+            with open(cpath, "w") as f:
+                f.write(str(counter))
+        except OSError as e:
+            print(f"[hermes] peringatan: counter memory gagal ditulis: {e}",
+                  flush=True)
+        every = max(1, int(self.memory_cfg["tidy_every_runs"]))
+        if counter % every == 0:
+            try:
+                print(f"[hermes] autoDream: tidy MEMORY.md (run ke-{counter}) ...",
+                      flush=True)
+                self.memory.tidy(
+                    self.api_key,
+                    model=self.memory_cfg["summarizer_model"],
+                )
+            except Exception as e:
+                print(f"[hermes] autoDream gagal (lanjut tanpa tidy): {e}",
+                      flush=True)
+        return self.memory.recall()
+
     # -- main --------------------------------------------------------
 
     def run(self) -> int:
         os.makedirs(self.outdir, exist_ok=True)
+        # Fase 2: ingatan sesi lalu disuntik ke system prompt.
+        recalled = self._setup_memory()
+        system_prompt = self.system_prompt
+        if recalled:
+            system_prompt += "\n\n## Ingatan sesi lalu\n" + recalled
         messages = [
-            {"role": "system", "content": self.system_prompt},
+            {"role": "system", "content": system_prompt},
             {"role": "user", "content": self.task},
         ]
         prog = {
@@ -468,9 +540,35 @@ def main(argv=None) -> int:
     ap.add_argument("--max-steps", type=int, default=40, help="maksimal langkah ReAct (default 40)")
     ap.add_argument("--config", default=None, help="profil YAML dari configs/ (opsional)")
     ap.add_argument("--system-prompt", default=None, help="override system prompt (opsional)")
+    ap.add_argument(
+        "--tidy",
+        action="store_true",
+        help="rapikan MEMORY.md di --outdir via autoDream lalu keluar "
+             "(tanpa menjalankan task).",
+    )
     args = ap.parse_args(argv)
 
     cfg = load_config(args.config) if args.config else {}
+    memory_cfg = cfg.get("memory") or {}
+
+    if args.tidy:
+        os.makedirs(args.outdir, exist_ok=True)
+        mem = AgentMemory(
+            os.path.join(args.outdir, "MEMORY.md"),
+            max_fact_chars=int(memory_cfg.get("max_fact_chars",
+                                              DEFAULT_MAX_FACT_CHARS)),
+        )
+        model = str(memory_cfg.get("summarizer_model",
+                                   MEMORY_SUMMARIZER_MODEL))
+        _validate_compaction_model(model)  # ag/* saja; bns/*/oc/* -> exit 2
+        try:
+            new_text = mem.tidy(get_api_key(), model=model)
+        except Exception as e:
+            sys.stderr.write(f"ERROR: tidy gagal: {e}\n")
+            return 1
+        print("MEMORY.md setelah tidy:\n" + (new_text or "(kosong)"))
+        return 0
+
     loop = HermesLoop(
         task=args.task,
         outdir=args.outdir,
@@ -478,6 +576,7 @@ def main(argv=None) -> int:
         max_steps=int(cfg.get("max_steps", args.max_steps)),
         system_prompt=args.system_prompt or cfg.get("system_prompt", SYSTEM_PROMPT),
         compaction_cfg=cfg.get("compaction"),
+        memory_cfg=memory_cfg or None,
     )
     return loop.run()
 

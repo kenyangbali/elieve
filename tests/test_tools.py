@@ -89,7 +89,8 @@ class TestExecTool(unittest.TestCase):
 class TestRegistry(unittest.TestCase):
     def test_dispatch_complete(self):
         self.assertEqual(
-            set(DISPATCH.keys()), {"read_file", "list_dir", "grep", "exec"}
+            set(DISPATCH.keys()),
+            {"read_file", "list_dir", "grep", "exec", "remember"},
         )
 
     def test_schemas_have_names(self):

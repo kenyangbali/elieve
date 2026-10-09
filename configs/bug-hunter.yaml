@@ -37,3 +37,10 @@ compaction:
   summarizer_model: ag/gemini-3-flash  # murah; bns/*/oc/* DITOLAK di kode
   full_compact_keep_recent: 5 # turn terakhir verbatim setelah full compact
   prefix_len: 2               # system + task awal: TIDAK PERNAH diubah
+
+# Fase 2 — MEMORY.md + autoDream (docs/ARCHITECTURE.md §2).
+memory:
+  enabled: true
+  tidy_every_runs: 5          # autoDream tiap N run (counter di <outdir>/.memory_counter)
+  max_fact_chars: 150         # butir lebih panjang dipotong cerdas di batas kata
+  summarizer_model: ag/gemini-3-flash  # murah; bns/*/oc/* DITOLAK di kode

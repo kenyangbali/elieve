@@ -53,15 +53,17 @@ def _truncate(s: str, note: str = "") -> str:
 from .read import read_file, list_dir, READ_SCHEMAS  # noqa: E402
 from .search import grep, SEARCH_SCHEMAS  # noqa: E402
 from .exec import exec as run_exec, EXEC_SCHEMAS  # noqa: E402
+from .memory import remember, REMEMBER_SCHEMAS, bind_memory, unbind_memory  # noqa: E402
 
 DISPATCH = {
     "read_file": read_file,
     "list_dir": list_dir,
     "grep": grep,
     "exec": run_exec,
+    "remember": remember,
 }
 
-TOOL_SCHEMAS = READ_SCHEMAS + SEARCH_SCHEMAS + EXEC_SCHEMAS
+TOOL_SCHEMAS = READ_SCHEMAS + SEARCH_SCHEMAS + EXEC_SCHEMAS + REMEMBER_SCHEMAS
 
 __all__ = [
     "ToolError",
@@ -71,4 +73,7 @@ __all__ = [
     "list_dir",
     "grep",
     "run_exec",
+    "remember",
+    "bind_memory",
+    "unbind_memory",
 ]
