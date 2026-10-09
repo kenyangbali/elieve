@@ -191,10 +191,22 @@ class TestShellActions(unittest.TestCase):
 class TestLoopIntegration(unittest.TestCase):
     """Hook terpasang di titik tepat loop ReAct."""
 
+    def setUp(self):
+        # Real exec tool calls need an existing workspace root; point it
+        # at /tmp for the test and restore afterwards.
+        from hermes import tools as _tools
+        self._prev_root = _tools.get_workspace_root()
+        _tools.configure_roots("/tmp")
+
+    def tearDown(self):
+        from hermes import tools as _tools
+        _tools.configure_roots(self._prev_root)
+
     def _loop(self, hooks_cfg, **kw):
         outdir = _tmpdir()
         with mock.patch.object(LOOP, "get_api_key", return_value="k"):
             loop = LOOP.HermesLoop(task="tugas uji", outdir=outdir,
+                                   model="ag/gemini-3-flash",
                                    hooks_cfg=hooks_cfg, **kw)
         return loop
 

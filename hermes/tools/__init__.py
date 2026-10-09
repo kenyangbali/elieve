@@ -1,22 +1,43 @@
-"""Tool primitif hermes-agent.
+"""hermes.tools — sandboxed primitive tools.
 
-Pola: toolset kecil (~12 kapabilitas) yang di-sandbox ketat.
-Setiap tool melempar ToolError bila input di luar izin — loop utama
-menangkapnya dan mengumpankannya kembali ke model sebagai observasi.
+Pattern: a small toolset (~6 capabilities) inside a tight sandbox.
+Every tool raises ToolError on out-of-policy input — the main loop
+catches it and feeds it back to the model as an observation.
 
-Helper bersama (_resolve, _truncate, ToolError) tinggal di sini agar
-modul read/search/exec konsisten.
+Shared helpers (_resolve, _truncate, ToolError) live here so the
+read/search/exec modules stay consistent.
+
+Sandbox roots: the primary root is configurable via configure_roots()
+(default: ./workspace resolved absolute from the process cwd);
+/tmp is always allowed as a second root.
 """
 
 import os
 
-WORKSPACE_ROOT = "/home/hatch/workspace"
 TMP_ROOT = "/tmp"
 MAX_OUT_CHARS = 12000
 
+WORKSPACE_ROOT = os.path.abspath("./workspace")
+
+
+def get_workspace_root():
+    """Return the currently configured primary sandbox root."""
+    return WORKSPACE_ROOT
+
+
+def configure_roots(workspace_root):
+    """Set the primary sandbox root.
+
+    The absolute path is stored and returned. /tmp remains allowed as a
+    second root regardless of this setting.
+    """
+    global WORKSPACE_ROOT
+    WORKSPACE_ROOT = os.path.abspath(workspace_root)
+    return WORKSPACE_ROOT
+
 
 class ToolError(Exception):
-    """Input tool tidak valid / di luar izin sandbox."""
+    """Tool input invalid / outside the sandbox policy."""
 
 
 def _under_allowed(real_path: str) -> bool:
@@ -29,24 +50,24 @@ def _under_allowed(real_path: str) -> bool:
 
 
 def _resolve(path: str) -> str:
-    """Paksa path absolut di dalam area izin; kembalikan real path."""
+    """Force an absolute path inside the allowed roots; return real path."""
     if not os.path.isabs(path):
         raise ToolError(
-            f"path harus ABSOLUT, dapat: '{path}'. "
-            f"Pakai /home/hatch/workspace/... atau /tmp/..."
+            f"path must be ABSOLUTE, got: '{path}'. "
+            f"Use {WORKSPACE_ROOT}/... or /tmp/..."
         )
     real = os.path.realpath(path)
     if not _under_allowed(real):
         raise ToolError(
-            f"path di luar area izin: '{path}' "
-            f"(hanya {WORKSPACE_ROOT} atau {TMP_ROOT} yang boleh)."
+            f"path outside allowed roots: '{path}' "
+            f"(allowed: {WORKSPACE_ROOT} or {TMP_ROOT})."
         )
     return real
 
 
 def _truncate(s: str, note: str = "") -> str:
     if len(s) > MAX_OUT_CHARS:
-        return s[:MAX_OUT_CHARS] + f"\n...[dipotong {len(s) - MAX_OUT_CHARS} char{note}]"
+        return s[:MAX_OUT_CHARS] + f"\n...[truncated {len(s) - MAX_OUT_CHARS} chars{note}]"
     return s
 
 
@@ -76,6 +97,11 @@ __all__ = [
     "ToolError",
     "DISPATCH",
     "TOOL_SCHEMAS",
+    "WORKSPACE_ROOT",
+    "TMP_ROOT",
+    "MAX_OUT_CHARS",
+    "configure_roots",
+    "get_workspace_root",
     "read_file",
     "list_dir",
     "grep",

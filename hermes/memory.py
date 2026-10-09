@@ -1,35 +1,38 @@
-"""Fase 2 — MEMORY.md + autoDream (implementasi penuh).
+"""Phase 2 — MEMORY.md + autoDream (full implementation).
 
-Masalah: tiap sesi Hermes mulai dari nol; pelajaran run sebelumnya hilang.
+Problem: every Hermes session starts from zero; lessons from previous
+runs are lost.
 
-Desain (docs/ARCHITECTURE.md §2):
-  - `MEMORY.md` per outdir: butir SINGKAT (maks ~150 karakter),
-    format `- <fakta> (YYYY-MM-DD)`. BUKAN arsip lengkap.
-  - `remember(fakta)`: tulis butir baru kapan saja (via tool agent).
-  - `recall()`: seluruh isi sebagai konteks tambahan di awal run.
-  - `tidy(api_key)`: autoDream berkala — gabung duplikat, hapus yang
-    basi/kontradiktif, rapikan format, memakai model murah ag/*.
-  - **Filter rahasia**: API key, token, kredensial TIDAK PERNAH ditulis —
-    butir yang cocok pola rahasia DITOLAK + peringatan.
+Design (docs/ARCHITECTURE.md §2):
+  - `MEMORY.md` per outdir: SHORT bullets (max ~150 chars),
+    format `- <fact> (YYYY-MM-DD)`. NOT a full archive.
+  - `remember(fact)`: write a new bullet any time (via the agent tool).
+  - `recall()`: the whole content as extra context at run start.
+  - `tidy(api_key)`: periodic autoDream — merge duplicates, drop
+    stale/contradictory ones, tidy the format, using a cheap model.
+  - **Secret filter**: API keys, tokens, credentials are NEVER written —
+    bullets matching a secret pattern are REJECTED + warned.
 
-Implementasi original.
+Original implementation.
 """
 
 import json
 import os
 import re
 import sys
-import urllib.request
-import urllib.error
 from datetime import date
 
-from .compaction import _validate_ag_model
+from .providers import (
+    ProviderConfig,
+    check_model_allowed,
+    post_chat_completions,
+)
 
 DEFAULT_MAX_FACT_CHARS = 150
 DEFAULT_SUMMARIZER_MODEL = "ag/gemini-3-flash"
 DEFAULT_TIDY_EVERY_RUNS = 5
 
-# (pola regex, label) — butir yang cocok DITOLAK, tidak pernah ditulis.
+# (regex, label) — matching bullets are REJECTED, never written.
 SECRET_PATTERNS = [
     (r"ghp_[A-Za-z0-9]{20,}", "GitHub personal access token"),
     (r"github_pat_[A-Za-z0-9_]{10,}", "GitHub fine-grained PAT"),
@@ -52,7 +55,7 @@ _DATE_RE = re.compile(r"\s*\(\d{4}-\d{2}-\d{2}\)\s*$")
 
 
 def contains_secret(text):
-    """Kembalikan label pola rahasia bila cocok, else None."""
+    """Return the matching secret-pattern label, else None."""
     for rx, label in _COMPILED_SECRETS:
         if rx.search(text or ""):
             return label
@@ -64,14 +67,14 @@ def _warn(msg):
 
 
 def _normalize_body(body):
-    """Normalisasi untuk deteksi duplikat: lowercase, spasi tunggal,
-    tanggal akhir dibuang."""
+    """Normalize for duplicate detection: lowercase, single spaces,
+    trailing date stripped."""
     body = " ".join((body or "").split()).lower()
     return _DATE_RE.sub("", body).strip()
 
 
 def _smart_truncate(text, limit):
-    """Potong di batas kata; tambah '...' bila dipotong."""
+    """Cut at a word boundary; append '...' when cut."""
     text = " ".join((text or "").split())
     if len(text) <= limit:
         return text
@@ -80,7 +83,7 @@ def _smart_truncate(text, limit):
 
 
 def _read_bullets(path):
-    """Baca butir '- ...' dari file; [] bila file tak ada."""
+    """Read '- ...' bullets from a file; [] when the file is absent."""
     if not os.path.isfile(path):
         return []
     bullets = []
@@ -93,7 +96,7 @@ def _read_bullets(path):
 
 
 class AgentMemory:
-    """Ingatan lintas sesi berbasis file markdown (fase 2)."""
+    """File-backed cross-session markdown memory (phase 2)."""
 
     def __init__(self, path, max_fact_chars=DEFAULT_MAX_FACT_CHARS):
         self.path = path
@@ -102,10 +105,10 @@ class AgentMemory:
     # -- tulis / baca -------------------------------------------------
 
     def remember(self, fact: str) -> bool:
-        """Simpan satu butir ingatan. True bila tersimpan.
+        """Store one memory bullet. True when stored.
 
-        Ditolak (False + peringatan): kosong, duplikat persis, atau
-        mengandung pola rahasia (TIDAK PERNAH ditulis ke file).
+        Rejected (False + warning): empty, exact duplicate, or matching
+        a secret pattern (NEVER written to file).
         """
         body = " ".join((fact or "").split())
         if not body:
@@ -130,21 +133,25 @@ class AgentMemory:
         return True
 
     def recall(self) -> str:
-        """Seluruh isi MEMORY.md sebagai teks konteks; '' bila belum ada."""
+        """Whole MEMORY.md content as context text; '' when absent."""
         bullets = _read_bullets(self.path)
         return "\n".join(bullets).strip()
 
     # -- autoDream ----------------------------------------------------
 
-    def tidy(self, api_key, model=DEFAULT_SUMMARIZER_MODEL, post_fn=None):
-        """Rapikan MEMORY.md via model murah: gabung duplikat, hapus yang
-        basi/kontradiktif, rapikan format. `post_fn(payload, api_key)`
-        injectable untuk test (tanpa network di unit test).
+    def tidy(self, api_key, model=DEFAULT_SUMMARIZER_MODEL, post_fn=None,
+               model_policy=None, provider_cfg=None):
+        """Tidy MEMORY.md via a cheap model: merge duplicates, drop
+        stale/contradictory ones, tidy the format.
+        `post_fn(payload, api_key)` is injectable for tests (no network
+        in unit tests); the default POSTs via the configured provider.
 
-        Mengembalikan isi baru (str). Butir hasil yang lolos filter
-        rahasia saja yang ditulis.
+        Returns the new content (str). Only bullets passing the secret
+        filter are written. `model_policy` is enforced via
+        providers.check_model_allowed (policy-driven; no hardcoded
+        model rules here).
         """
-        model = _validate_ag_model(model)
+        model = check_model_allowed(model, model_policy)
         bullets = _read_bullets(self.path)
         if len(bullets) < 2:
             return "\n".join(bullets).strip()
@@ -168,8 +175,21 @@ class AgentMemory:
             "messages": [{"role": "user", "content": prompt}],
             "stream": False,
         }
-        post = post_fn or _default_post
-        content = post(payload, api_key) or ""
+        if post_fn is not None:
+            content = post_fn(payload, api_key) or ""
+        else:
+            cfg = (provider_cfg if provider_cfg is not None
+                   else ProviderConfig())
+            status, text = post_chat_completions(
+                cfg, payload, api_key=api_key)
+            if status >= 400:
+                raise RuntimeError(f"tidy HTTP {status}: {text[:300]}")
+            try:
+                data = json.loads(text)
+                content = data["choices"][0]["message"].get("content") or ""
+            except Exception as e:
+                raise RuntimeError(
+                    f"tidy response could not be parsed: {e}")
 
         new_bullets = []
         for line in content.splitlines():
@@ -198,26 +218,3 @@ class AgentMemory:
         return "\n".join(final)
 
 
-def _default_post(payload, api_key, url=None, timeout=120):
-    """POST chat completion minimal (stdlib saja); kembalikan content str."""
-    url = url or "http://127.0.0.1:20128/v1/chat/completions"
-    req = urllib.request.Request(
-        url,
-        data=json.dumps(payload).encode("utf-8"),
-        headers={
-            "Authorization": "Bearer " + api_key,
-            "Content-Type": "application/json",
-        },
-        method="POST",
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            data = json.loads(resp.read().decode("utf-8", "replace"))
-    except urllib.error.HTTPError as e:
-        raise RuntimeError(f"tidy HTTP {e.code}: {e.read().decode('utf-8', 'replace')[:300]}")
-    except Exception as e:
-        raise RuntimeError(f"tidy gagal: {e}")
-    try:
-        return data["choices"][0]["message"].get("content") or ""
-    except Exception as e:
-        raise RuntimeError(f"respon tidy tidak bisa di-parse: {e}")

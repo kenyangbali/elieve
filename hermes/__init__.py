@@ -1,17 +1,16 @@
-"""hermes-agent — framework agent AI modular.
+"""hermes-agent — modular AI agent framework.
 
-Baseline v1: ReAct loop dengan function calling (port rapi dari
-hermes-hunter/hunter.py). Pola arsitektur lanjutan (compaction, memory,
-permission classifier, orchestrator) didesain di docs/ARCHITECTURE.md
-dan diimplementasi bertahap per fase.
+Baseline v1: a ReAct loop with function calling. The advanced architecture
+patterns (compaction, memory, permission classifier, orchestrator) are
+designed in docs/ARCHITECTURE.md and implemented incrementally per phase.
 """
 
 __version__ = "0.1.0"
 
 
 def __getattr__(name):
-    # Lazy import agar `python3 -m hermes.loop` tidak memicu
-    # RuntimeWarning modul-ganda saat package __init__ dieksekusi.
+    # Lazy import so `python3 -m hermes.loop` does not trigger a
+    # double-module RuntimeWarning when the package __init__ runs.
     if name == "HermesLoop":
         from .loop import HermesLoop
 

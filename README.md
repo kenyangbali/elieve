@@ -1,71 +1,181 @@
 # hermes-agent
 
-Framework agent AI modular — ReAct loop dengan function calling,
-toolset ter-sandbox, dan arsitektur yang dirancang untuk ditingkatkan
-bertahap (context compaction → memory → permission gate → orchestrator).
+A modular Python AI-agent framework: a ReAct loop with function calling,
+sandboxed tools, and a production-hardened harness for long autonomous
+runs. Provider-agnostic — it works with **any OpenAI-compatible chat
+completions API**.
 
-Baseline v1 di-port rapi dari `hermes-hunter` (loop pemburu bug yang
-sudah terbukti jalan produksi) menjadi struktur paket Python yang
-bersih.
+## Features
+
+- **ReAct loop** (`hermes/loop.py`) — think → act → observe with tool
+  calls, step cap, and resumable runs (`progress.json` per run).
+- **Sandboxed tools** (`hermes/tools/`) — `read_file`, `search`,
+  `exec`, plus `remember`/`task_update` memory & task tools. Tools are
+  confined to a configurable workspace root; destructive command
+  patterns are blocked by default.
+- **Context compaction** (`hermes/compaction.py`) — multi-layer
+  compression (micro-compaction per turn, threshold full compaction)
+  that keeps prompt-cache prefixes stable to cut token cost on long
+  sessions.
+- **Cross-session memory** (`hermes/memory.py`) — a `MEMORY.md` per
+  outdir with `remember`/`recall`, plus `autoDream` periodic cleanup
+  (`--tidy`).
+- **2-stage permission gate** (`hermes/permissions.py`) — optional,
+  pluggable classifier (fast yes/no stage + reasoning stage) with a
+  fail-closed regex layer underneath when the classifier is off.
+- **Multi-agent orchestrator** (`hermes/orchestrator.py`) — optional
+  manager/worker mode: one planner spawns parallel workers (max depth
+  1) with restricted toolsets, then merges their reports.
+- **Lifecycle hooks** (`hermes/hooks.py`) — deterministic events the
+  model can't skip: `PreToolUse`, `PostToolUse`, `PreCompact`,
+  `PostCompact`, `OnStop`, `OnError`.
+- **Task tracking** (`hermes/tasks.py`) — structured per-run checklists
+  (`tasks.json`) with a `task_update` tool, surviving compaction.
+- **Token/cost accounting** (`hermes/accounting.py`) — per-model usage
+  totals (`usage.json`), context-window warnings, and configurable
+  run cost caps.
 
 ## Quickstart
 
+### Install
+
 ```bash
-cd ~/workspace/hermes-agent
+git clone https://github.com/kenyangbali/hermes-agent.git
+cd hermes-agent
+pip install -e .
+```
 
-# lihat opsi
-python3 -m hermes.loop --help
+Or install directly from git:
 
-# contoh run (butuh 9router aktif di localhost:20128 + Default Key)
-python3 -m hermes.loop \
-  --task "Audit keamanan direktori /home/hatch/workspace/contoh" \
-  --outdir /tmp/hermes-run-1
+```bash
+pip install git+https://github.com/kenyangbali/hermes-agent.git
+```
 
-# pakai profil
-python3 -m hermes.loop \
-  --config configs/bug-hunter.yaml \
-  --task "Audit keamanan ..." \
-  --outdir /tmp/hermes-run-1
+### Configure the API key
 
-# unit test tools (tanpa butuh API)
+```bash
+export OPENAI_API_KEY="sk-..."
+```
+
+Never commit keys to the repo. The key is read from the environment
+variable named in the config (`api_key_env`), never stored in config
+files.
+
+### Run
+
+The `pip install` step registers a `hermes` console entry point:
+
+```bash
+hermes --task "Summarize the README of ./workspace/demo" --outdir ./run-1
+```
+
+Without installing (repo checkout), the equivalent module invocation:
+
+```bash
+python3 -m hermes.loop --task "Summarize the README of ./workspace/demo" --outdir ./run-1
+```
+
+Each run writes `OUT.md` (final report) and `progress.json`
+(resumable state) into `--outdir`.
+
+### Custom provider via config
+
+```bash
+hermes --config configs/example.yaml --task "..." --outdir ./run-1
+```
+
+Minimal `example.yaml` (see `configs/example.yaml` for all blocks):
+
+```yaml
+provider:
+  base_url: https://api.openai.com/v1
+  api_key_env: OPENAI_API_KEY
+  model: gpt-4o-mini
+  timeout_s: 180
+
+workspace_root: ./workspace
+language: en   # en | id
+```
+
+### Local model example (Ollama)
+
+```bash
+export OLLAMA_API_KEY=ollama   # Ollama ignores the key; any dummy value works
+```
+
+```yaml
+provider:
+  base_url: http://localhost:11434/v1
+  api_key_env: OLLAMA_API_KEY
+  model: qwen3:8b
+  timeout_s: 300
+```
+
+Any other OpenAI-compatible server (e.g. vLLM) works the same way —
+just point `base_url` at its `/v1` endpoint and set the model name.
+
+### Tests
+
+```bash
 python3 -m unittest discover -s tests
 ```
 
-Hasil tiap run: `OUT.md` (laporan akhir) + `progress.json` (resumable)
-di `--outdir`.
+Runs the full unit suite (no network/API key needed).
 
-## Struktur
+### CLI reference
 
 ```
-hermes-agent/
-├── README.md
-├── docs/ARCHITECTURE.md      # desain 4 pola peningkatan
-├── hermes/
-│   ├── loop.py               # ReAct loop v1 (HermesLoop)
-│   ├── compaction.py         # fase 1 (stub)
-│   ├── memory.py             # fase 2 (stub)
-│   ├── permissions.py        # fase 3 (stub)
-│   ├── orchestrator.py       # fase 4 (stub)
-│   └── tools/                # read, search, exec (ter-sandbox)
-├── configs/bug-hunter.yaml   # profil siap pakai
-└── tests/test_tools.py
+hermes --task TASK --outdir OUTDIR [--model MODEL] [--max-steps MAX_STEPS]
+       [--config CONFIG] [--system-prompt SYSTEM_PROMPT] [--workspace WORKSPACE]
+       [--lang {en,id}] [--tidy] [--no-exec]
 ```
 
-## Aturan model
+- `--model` overrides the config's model; `--max-steps` caps ReAct
+  steps (default 40).
+- `--lang` selects the default system prompt (`en` | `id`).
+- `--tidy` runs `autoDream` cleanup on the outdir's `MEMORY.md` and
+  exits (no task is run).
+- `--no-exec` drops the `exec` tool for a read-only run (used by
+  orchestrator workers).
 
-- **Boleh**: `ag/*` (default `ag/claude-opus-4-6-thinking`)
-- **Dilarang keras**: `bns/*`, `oc/*` — ditolak di kode sebelum request.
+## Configuration
 
-## Fase Pengembangan
+The `provider:` block in a YAML config:
 
-| Fase | Komponen | Status | Dampak |
-|------|----------|--------|--------|
-| 1 | **Context compaction** (`hermes/compaction.py`) | stub | Hemat token/biaya; ringkas riwayat dingin, pertahankan cache prompt |
-| 2 | **MEMORY.md + autoDream** (`hermes/memory.py`) | stub | Ingatan lintas sesi; perapian otomatis berkala |
-| 3 | **Permission classifier 2 tahap** (`hermes/permissions.py`) | stub | Izin semantik (kilat + reasoning), gantikan regex statis |
-| 4 | **Multi-agent orchestrator** (`hermes/orchestrator.py`) | stub | Worker paralel bertask-spesifik, laporan gabungan |
+| Key | Meaning |
+|-----|---------|
+| `base_url` | OpenAI-compatible chat completions endpoint (e.g. `https://api.openai.com/v1`) |
+| `api_key_env` | Name of the env var holding the API key (key itself never in the file) |
+| `model` | Default model for the run (overridable with `--model` / top-level `model:`) |
+| `timeout_s` | Per-request timeout in seconds |
+| `key_provider` | Alternative key source (e.g. `9router` reads from a local 9router DB instead of env) |
 
-Aturan main: satu fase selesai (implementasi → unit test → micro-audit
-nyata) baru lanjut ke fase berikutnya. Baseline v1 tidak boleh rusak.
+Other top-level keys:
 
-Detail desain tiap fase: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+| Key | Meaning |
+|-----|---------|
+| `model_policy` | `allow:` / `forbid:` model prefix lists (trailing `*` wildcards; `forbid` wins). Empty = unrestricted. |
+| `workspace_root` | Sandbox root for tools (relative = resolved from cwd; `/tmp` always allowed) |
+| `language` | Default system-prompt language: `en` or `id` (CLI `--lang` overrides) |
+
+Note: `configs/bug-hunter.yaml` is a personal, Indonesian-language
+example profile (built around a local gateway setup), **not** the
+default. Use `configs/example.yaml` as the generic starting point.
+
+## License
+
+MIT — see [LICENSE](LICENSE).
+
+Forks may relicense or replace the license file; the original file
+retains the MIT grant as published.
+
+## Documentation
+
+| File | Description |
+|------|-------------|
+| `docs/ARCHITECTURE.md` | Original design doc for the 4-phase harness upgrades (legacy, Indonesian) |
+| `docs/PHASE1-COMPACTION.md` | Compaction design notes: 4 layers, micro-compaction details (legacy, Indonesian) |
+| `docs/HOOKS.md` | Lifecycle hook system: events, semantics, config (legacy, Indonesian) |
+| `docs/TASKS.md` | Structured task tracking: `tasks.json`, `task_update` tool (legacy, Indonesian) |
+| `docs/ACCOUNTING.md` | Token & cost accounting: usage tracking, warnings, cost caps (legacy, Indonesian) |
+| `docs/GAP-AUDIT.md` | Feature-gap audit vs. public Claude Code docs; operational context is personal (legacy, Indonesian) |

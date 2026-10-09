@@ -1,40 +1,43 @@
-"""Fase 1 — context compaction: pipeline 4 lapis (implementasi penuh).
+"""Phase 1 — context compaction: 4-layer pipeline (full implementation).
 
-Masalah: riwayat `messages` di HermesLoop tumbuh tanpa batas sampai
-max_steps. Tiap turn mengirim ulang seluruh riwayat = token input membengkak.
+Problem: the `messages` history in HermesLoop grows unbounded until
+max_steps. Re-sending the whole history every turn bloats input tokens.
 
-Desain (docs/PHASE1-COMPACTION.md):
-  Lapis 1 — microcompaction per-turn, murni operasi string, tanpa LLM.
-  Lapis 2 — threshold pipeline progresif berdasar prompt_tokens vs limit.
-  Lapis 3 — full compaction via LLM murah (ag/gemini-3-flash), jarang.
-  Lapis 4 — prefix (system + pesan awal) TIDAK PERNAH diubah/di-reorder.
+Design (docs/PHASE1-COMPACTION.md):
+  Layer 1 — per-turn microcompaction, pure string ops, no LLM.
+  Layer 2 — progressive threshold pipeline based on prompt_tokens vs limit.
+  Layer 3 — full compaction via a cheap LLM, rarely.
+  Layer 4 — the prefix (system + initial messages) is NEVER modified.
 
-Struktur messages yang dipakai:
+Message shapes used here:
   system            -> {"role": "system", "content": str}
-  user (task awal)  -> {"role": "user", "content": str}
+  user (initial)    -> {"role": "user", "content": str}
   assistant         -> {"role": "assistant", "content": str|None,
                         "tool_calls": [{id, function:{name, arguments}}]}
   tool              -> {"role": "tool", "tool_call_id": str,
                         "name": str, "content": str}
 
-Semua fungsi di sini MENGEMBALIKAN list baru — input tidak pernah dimutasi.
-Implementasi original, tidak menyalin kode dari mana pun.
+Every function here RETURNS a new list — inputs are never mutated.
+Original implementation.
 """
 
 import json
 import logging
 import time
-import urllib.request
+
+from .providers import (
+    ProviderConfig,
+    check_model_allowed,
+    post_chat_completions,
+)
 
 log = logging.getLogger("hermes.compaction")
 
-API_URL = "http://127.0.0.1:20128/v1/chat/completions"
-
-# -- konstanta -------------------------------------------------------
-OFFLOADED_FMT = "[offloaded: {summary}]"   # Lapis 1: pointer hasil tool lama
-MASKED_PTR = "[offloaded to scratch]"      # Lapis 2 (80%): masking observasi
-PRUNED_PTR = "[pruned]"                    # Lapis 2 (85%): pruning cepat
-COMPACTED_MARK = "[COMPACTED]"             # Lapis 3: pesan ringkasan LLM
+# -- constants -------------------------------------------------------
+OFFLOADED_FMT = "[offloaded: {summary}]"   # Layer 1: old tool-result pointer
+MASKED_PTR = "[offloaded to scratch]"      # Layer 2 (80%): observation masking
+PRUNED_PTR = "[pruned]"                    # Layer 2 (85%): fast pruning
+COMPACTED_MARK = "[COMPACTED]"             # Layer 3: LLM summary message
 
 DEFAULT_CONTEXT_LIMIT = 64000
 DEFAULT_RECENCY_WINDOW = 5
@@ -42,34 +45,32 @@ DEFAULT_MAX_TOOL_CHARS = 2000
 DEFAULT_THRESHOLDS = [70, 80, 85, 90, 95]
 DEFAULT_SUMMARIZER_MODEL = "ag/gemini-3-flash"
 DEFAULT_KEEP_RECENT = 5
-DEFAULT_PREFIX_LEN = 2          # system prompt + pesan task awal
+DEFAULT_PREFIX_LEN = 2          # system prompt + initial task message
 DEFAULT_MAX_AGE_HOURS = 24
 
-FORBIDDEN_PREFIXES = ("bns/", "oc/")   # kuota terlarang — ditolak di kode
-
-# Gap 2 — tool hasil yang membawa STATE (bukan sekadar observasi).
-# Pesan tool dengan nama ini dikecualikan dari pemotongan micro_compact
-# maupun masking observasi: state task harus survive compaction.
-# Ground truth tetap tasks.json; ringkasan segar disuntik tiap turn ke
-# system prompt oleh HermesLoop ("## Daftar task"). Lihat hermes/tasks.py.
+# Gap 2 — tools whose results carry STATE (not just observations).
+# Messages from these tools are excluded from micro_compact trimming and
+# observation masking: task state must survive compaction.
+# Ground truth stays in tasks.json; a fresh summary is injected into the
+# system prompt every turn by HermesLoop ("## Daftar task"). See hermes/tasks.py.
 STATEFUL_TOOL_NAMES = frozenset({"task_update"})
 
-CHARS_PER_TOKEN = 4             # heuristik estimasi bila usage tak tersedia
+CHARS_PER_TOKEN = 4             # token-estimate heuristic when usage is absent
 
 
-# -- util dasar ------------------------------------------------------
+# -- basic utils ------------------------------------------------------
 
 def estimate_tokens(messages) -> int:
-    """Estimasi token kasar: chars/4 + overhead per pesan.
+    """Rough token estimate: chars/4 + per-message overhead.
 
-    Dipakai bila respons API tidak menyertakan `usage`.
+    Used when the API response omits `usage`.
     """
     total = 0
     for m in messages or []:
         c = m.get("content")
         if isinstance(c, str):
             total += len(c) // CHARS_PER_TOKEN
-        total += 8  # overhead role / struktur pesan
+        total += 8  # role / message-structure overhead
         for tc in m.get("tool_calls") or []:
             fn = tc.get("function") or {}
             total += len(json.dumps(fn, ensure_ascii=False)) // CHARS_PER_TOKEN
@@ -77,7 +78,7 @@ def estimate_tokens(messages) -> int:
 
 
 def _one_line_summary(content, limit=120) -> str:
-    """Ringkasan 1 baris untuk pointer offload: baris pertama non-kosong."""
+    """One-line summary for an offload pointer: first non-empty line."""
     text = " ".join(str(content).split())
     if len(text) > limit:
         return text[:limit] + "…"
@@ -85,10 +86,10 @@ def _one_line_summary(content, limit=120) -> str:
 
 
 def _split_turns(body):
-    """Kelompokkan body (di luar prefix) menjadi turn.
+    """Group the body (outside the prefix) into turns.
 
-    Satu turn diawali pesan assistant dan mencakup pesan-pesan tool/user
-    sesudahnya sampai assistant berikutnya.
+    One turn starts at an assistant message and covers the tool/user
+    messages after it until the next assistant message.
     """
     turns, cur = [], []
     for m in body:
@@ -102,7 +103,7 @@ def _split_turns(body):
 
 
 def _active_tool_call_ids(turns) -> set:
-    """tool_call_id yang dirujuk turn terakhir = 'masih aktif'."""
+    """tool_call_ids referenced by the last turn = 'still active'."""
     ids = set()
     if not turns:
         return ids
@@ -115,10 +116,10 @@ def _active_tool_call_ids(turns) -> set:
 
 
 def _protected_global_idx(body_len, turns, recency_window, prefix_len) -> set:
-    """Index global pesan yang masuk jendela recency (tidak boleh disentuh)."""
+    """Global indexes of messages inside the recency window (untouchable)."""
     keep = turns[-recency_window:] if recency_window > 0 else []
     protected = set()
-    # petakan ulang turn -> index body
+    # remap turn -> body index
     idx = 0
     for t in turns:
         for _ in t:
@@ -128,42 +129,26 @@ def _protected_global_idx(body_len, turns, recency_window, prefix_len) -> set:
     return protected
 
 
-def _validate_ag_model(model: str) -> str:
-    """Summarizer HANYA boleh ag/*. bns/*/oc/* DITOLAK (ValueError)."""
-    m = (model or "").strip()
-    low = m.lower()
-    for prefix in FORBIDDEN_PREFIXES:
-        if low.startswith(prefix):
-            raise ValueError(
-                f"model '{model}' DILARANG — jangan sentuh kuota bns/* atau oc/*."
-            )
-    if not low.startswith("ag/"):
-        raise ValueError(
-            f"model summarizer harus ag/* (dapat '{model}')."
-        )
-    return m
-
-
-# -- Lapis 1: microcompaction ----------------------------------------
+# -- Layer 1: microcompaction ----------------------------------------
 
 def micro_compact(messages, recency_window=DEFAULT_RECENCY_WINDOW,
                   max_tool_chars=DEFAULT_MAX_TOOL_CHARS,
                   prefix_len=DEFAULT_PREFIX_LEN,
                   max_age_hours=DEFAULT_MAX_AGE_HOURS):
-    """Potong hasil tool lama jadi pointer. Murni string ops, tanpa LLM.
+    """Trim old tool results into pointers. Pure string ops, no LLM.
 
-    Aturan:
-      - prefix (system + pesan awal) TIDAK PERNAH disentuh;
-      - N turn terakhir (recency_window) TIDAK disentuh;
-      - hasil tool yang tool_call_id-nya dirujuk turn terakhir ("aktif")
-        TIDAK disentuh;
-      - pesan berumur > max_age_hours (bila membawa field "ts" epoch)
-        di zona tengah di-drop.
-    Return: list messages BARU.
+    Rules:
+      - the prefix (system + initial messages) is NEVER touched;
+      - the last N turns (recency_window) are untouched;
+      - tool results whose tool_call_id is referenced by the last turn
+        ("active") are untouched;
+      - messages older than max_age_hours (when carrying an epoch "ts"
+        field) in the middle zone are dropped.
+    Returns: a NEW messages list.
     """
     if not messages:
         return []
-    out = [dict(m) for m in messages]  # salinan dangkal per pesan
+    out = [dict(m) for m in messages]  # shallow copy per message
     prefix_end = min(prefix_len, len(out))
     body = out[prefix_end:]
     if not body:
@@ -180,7 +165,7 @@ def micro_compact(messages, recency_window=DEFAULT_RECENCY_WINDOW,
         gi = prefix_end + i
         if gi in protected:
             continue
-        # time-based clearing: hanya untuk pesan ber-ts di zona tengah
+        # time-based clearing: only for ts-bearing messages in the middle zone
         ts = m.get("ts")
         if isinstance(ts, (int, float)) and ts > 0:
             if (now - ts) > max_age_hours * 3600:
@@ -190,7 +175,7 @@ def micro_compact(messages, recency_window=DEFAULT_RECENCY_WINDOW,
             continue
         if m.get("tool_call_id") in active_ids:
             continue
-        # Gap 2: hasil tool pembawa state task tidak boleh dipotong.
+        # Gap 2: state-carrying tool results must not be trimmed.
         if m.get("name") in STATEFUL_TOOL_NAMES:
             continue
         content = m.get("content") or ""
@@ -208,10 +193,9 @@ def micro_compact(messages, recency_window=DEFAULT_RECENCY_WINDOW,
 def mask_observations(messages, recency_window=DEFAULT_RECENCY_WINDOW,
                       prefix_len=DEFAULT_PREFIX_LEN,
                       marker=MASKED_PTR):
-    """80%: hasil tool lama di luar recency window -> marker.
+    """80%: old tool results outside the recency window -> marker.
 
-    Metadata (tool_call_id, name) dipertahankan agar pasangan
-    tool_calls tetap valid.
+    Metadata (tool_call_id, name) is kept so tool_calls pairing stays valid.
     """
     out = [dict(m) for m in messages]
     prefix_end = min(prefix_len, len(out))
@@ -228,7 +212,7 @@ def mask_observations(messages, recency_window=DEFAULT_RECENCY_WINDOW,
             continue
         if m.get("tool_call_id") in active_ids:
             continue
-        # Gap 2: hasil tool pembawa state task tidak boleh di-mask.
+        # Gap 2: state-carrying tool results must not be masked.
         if m.get("name") in STATEFUL_TOOL_NAMES:
             continue
         if m.get("content") != marker:
@@ -239,10 +223,10 @@ def mask_observations(messages, recency_window=DEFAULT_RECENCY_WINDOW,
 def prune_middle(messages, recency_window=DEFAULT_RECENCY_WINDOW,
                  prefix_len=DEFAULT_PREFIX_LEN,
                  max_user_chars=500):
-    """85% fast pruning, jalan dari tengah:
-      - pesan assistant di zona tengah: content teks dikosongkan
-        (tool_calls DIPERTAHANKAN agar pairing tool tetap valid);
-      - pesan user di zona tengah: dipotong ke max_user_chars.
+    """85% fast pruning, working from the middle:
+      - assistant messages in the middle zone: text content emptied
+        (tool_calls KEPT so tool pairing stays valid);
+      - user messages in the middle zone: cut to max_user_chars.
     """
     out = [dict(m) for m in messages]
     prefix_end = min(prefix_len, len(out))
@@ -272,19 +256,19 @@ def apply_threshold_pipeline(messages, prompt_tokens,
                              recency_window=DEFAULT_RECENCY_WINDOW,
                              prefix_len=DEFAULT_PREFIX_LEN,
                              summarizer=None):
-    """Pipeline progresif berdasar rasio prompt_tokens / context_limit.
+    """Progressive pipeline based on the prompt_tokens / context_limit ratio.
 
-    thresholds = [t70, t80, t85, t90, t95] (persen).
-      70% -> warning saja (log + catat aksi);
-      80% -> observation masking (recency_window penuh);
-      85% -> masking + fast pruning mundur;
+    thresholds = [t70, t80, t85, t90, t95] (percent).
+      70% -> warning only (log + record action);
+      80% -> observation masking (full recency_window);
+      85% -> masking + backward fast pruning;
       90% -> aggressive masking (recency_window 5 -> 2);
-      95% -> full compaction via `summarizer` (callable
-             messages -> messages_baru). Bila summarizer None, fallback
-             ke aggressive masking agar loop tidak crash.
+      95% -> full compaction via `summarizer` (a callable
+             messages -> new_messages). When summarizer is None, fall back
+             to aggressive masking so the loop never crashes.
 
-    Return: (messages_baru, actions: [str]).
-    Prefix tidak pernah diubah di semua aksi.
+    Returns: (new_messages, actions: [str]).
+    The prefix is never modified by any action.
     """
     t = sorted(thresholds or DEFAULT_THRESHOLDS)
     ratio = (prompt_tokens / context_limit * 100.0) if context_limit else 0.0
@@ -348,7 +332,7 @@ riwayat (jangan mengarang). Maksimal ~40 baris.
 
 
 def _serialize_for_summary(middle, max_chars=600):
-    """Serialisasi zona tengah jadi teks untuk summarizer."""
+    """Serialize the middle zone to text for the summarizer."""
     lines = []
     for m in middle:
         role = m.get("role")
@@ -367,28 +351,26 @@ def _serialize_for_summary(middle, max_chars=600):
     return "\n".join(lines)
 
 
-def _post_json(url, payload, api_key, timeout=120):
-    req = urllib.request.Request(
-        url,
-        data=json.dumps(payload).encode("utf-8"),
-        headers={"Authorization": "Bearer " + api_key,
-                 "Content-Type": "application/json"},
-        method="POST",
-    )
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        return resp.status, resp.read().decode("utf-8", "replace")
+def _default_post(provider_cfg, url, payload, api_key, timeout=120):
+    """Default POST for the summarizer: via the configured provider."""
+    cfg = provider_cfg if provider_cfg is not None else ProviderConfig()
+    return post_chat_completions(cfg, payload, api_key=api_key,
+                                 timeout=timeout)
 
 
 def full_compact(messages, model, api_key, keep_recent=DEFAULT_KEEP_RECENT,
-                 prefix_len=DEFAULT_PREFIX_LEN, post_fn=None):
-    """Ringkas zona tengah via LLM murah; kembalikan pesan baru.
+                 prefix_len=DEFAULT_PREFIX_LEN, post_fn=None,
+                 model_policy=None, provider_cfg=None):
+    """Summarize the middle zone via a cheap LLM; return the new messages.
 
-    Hasil: prefix (verbatim) + SATU pesan user "[COMPACTED] <ringkasan>"
-    + keep_recent turn terakhir (verbatim).
-    `post_fn(url, payload, api_key, timeout) -> (status, text)` bisa
-    di-inject untuk testing; default POST ke 9router.
+    Result: prefix (verbatim) + ONE user message "[COMPACTED] <summary>"
+    + keep_recent latest turns (verbatim).
+    `post_fn(url, payload, api_key, timeout) -> (status, text)` can be
+    injected for testing; the default POSTs via the configured provider.
+    `model_policy` is enforced via providers.check_model_allowed
+    (policy-driven; no hardcoded model rules here).
     """
-    model = _validate_ag_model(model)
+    model = check_model_allowed(model, model_policy)
     if not messages:
         return []
     prefix_end = min(prefix_len, len(messages))
@@ -403,7 +385,7 @@ def full_compact(messages, model, api_key, keep_recent=DEFAULT_KEEP_RECENT,
     recent = [dict(m) for t in recent_turns for m in t]
 
     if not middle:
-        # tidak ada yang bisa diringkas — kembalikan apa adanya
+        # nothing to summarize — return as-is
         return [dict(m) for m in messages]
 
     history_text = _serialize_for_summary(middle)
@@ -416,39 +398,46 @@ def full_compact(messages, model, api_key, keep_recent=DEFAULT_KEEP_RECENT,
         ],
         "stream": False,
     }
-    post = post_fn or _post_json
-    status, text = post(API_URL, payload, api_key, 120)
+    post = post_fn or (lambda url, payload, api_key, timeout=120:
+                       _default_post(provider_cfg, url, payload, api_key,
+                                     timeout))
+    cfg = provider_cfg if provider_cfg is not None else ProviderConfig()
+    url = cfg.base_url.rstrip("/") + "/chat/completions" if cfg.base_url else ""
+    status, text = post(url, payload, api_key, 120)
     if status >= 400:
         raise RuntimeError(f"summarizer HTTP {status}: {text[:300]}")
     try:
         data = json.loads(text)
         summary = data["choices"][0]["message"].get("content") or ""
     except Exception as e:
-        raise RuntimeError(f"respon summarizer tidak bisa di-parse: {e}")
-    summary = summary.strip() or "(ringkasan kosong)"
+        raise RuntimeError(f"summarizer response could not be parsed: {e}")
+    summary = summary.strip() or "(empty summary)"
 
     boundary = {"role": "user",
                 "content": f"{COMPACTED_MARK} {summary}"}
     return prefix + [boundary] + recent
 
 
-# -- Lapis 4: cache preservation -------------------------------------
-# Diimplementasikan secara struktural: SEMUA fungsi di atas menerima
-# `prefix_len` (default 2 = system prompt + pesan task awal) dan tidak
-# pernah mengubah, me-reorder, atau menghapus messages[:prefix_len].
+# -- Layer 4: cache preservation -------------------------------------
+# Implemented structurally: EVERY function above accepts `prefix_len`
+# (default 2 = system prompt + initial task message) and never modifies,
+# reorders, or deletes messages[:prefix_len].
 # Test: tests/test_compaction.py::TestPrefixPreservation.
 
 
 class ContextCompactor:
-    """Pembungkus stateful di atas fungsi-fungsi lapis (kompat stub lama)."""
+    """Stateful wrapper over the layer functions (legacy compat stub)."""
 
     def __init__(self, cache_model=DEFAULT_SUMMARIZER_MODEL,
                  threshold_ratio=0.7, keep_last_turns=6,
                  context_limit=DEFAULT_CONTEXT_LIMIT,
                  recency_window=DEFAULT_RECENCY_WINDOW,
                  max_tool_chars=DEFAULT_MAX_TOOL_CHARS,
-                 prefix_len=DEFAULT_PREFIX_LEN):
-        self.cache_model = _validate_ag_model(cache_model)
+                 prefix_len=DEFAULT_PREFIX_LEN,
+                 model_policy=None, provider_cfg=None):
+        self.cache_model = check_model_allowed(cache_model, model_policy)
+        self.model_policy = dict(model_policy or {})
+        self.provider_cfg = provider_cfg
         self.threshold_ratio = threshold_ratio
         self.keep_last_turns = keep_last_turns
         self.context_limit = context_limit
@@ -458,9 +447,9 @@ class ContextCompactor:
 
     def maybe_compact(self, messages, api_key=None, prompt_tokens=None,
                       summarizer=None):
-        """Satu pintu: micro per-turn + pipeline threshold bila ada usage.
+        """Single entry: per-turn micro + threshold pipeline when usage exists.
 
-        Tanpa prompt_tokens hanya micro_compact yang jalan (tanpa LLM).
+        Without prompt_tokens only micro_compact runs (no LLM).
         """
         out = micro_compact(messages, recency_window=self.recency_window,
                             max_tool_chars=self.max_tool_chars,
@@ -469,11 +458,15 @@ class ContextCompactor:
             return out, ["micro"]
         if summarizer is None and api_key:
             model = self.cache_model
+            policy = self.model_policy
+            prov = self.provider_cfg
 
             def summarizer(msgs, _m=model, _k=api_key):
                 return full_compact(msgs, _m, _k,
                                     keep_recent=self.keep_last_turns,
-                                    prefix_len=self.prefix_len)
+                                    prefix_len=self.prefix_len,
+                                    model_policy=policy,
+                                    provider_cfg=prov)
 
         return apply_threshold_pipeline(
             out, prompt_tokens,
@@ -483,24 +476,24 @@ class ContextCompactor:
             summarizer=summarizer)
 
 
-# -- integrasi hook lifecycle (Gap 1, docs/GAP-AUDIT.md G1) -----------
-# Fungsi-fungsi di atas MESTI murni (tanpa efek samping) agar bisa
-# di-test deterministik; hook PreCompact/PostCompact difire dari loop di
-# sekitar pemanggilan pipeline, via helper di bawah (None-safe).
+# -- hook lifecycle integration (Gap 1, docs/GAP-AUDIT.md G1) -----------
+# The functions above MUST stay pure (no side effects) so they can be
+# tested deterministically; the loop fires PreCompact/PostCompact hooks
+# around pipeline calls via the helpers below (None-safe).
 
 def fire_pre_compact(runner, ctx):
-    """Fire hook PreCompact sebelum pemampatan. runner=None -> no-op."""
+    """Fire the PreCompact hook before compressing. runner=None -> no-op."""
     if runner is None:
         return {}
     try:
         return runner.pre_compact(ctx or {})
     except Exception as e:
-        log.warning("PreCompact gagal (run lanjut): %s", e)
+        log.warning("PreCompact failed (run continues): %s", e)
         return {"error": str(e)}
 
 
 def fire_post_compact(runner, ctx, info=None):
-    """Fire hook PostCompact sesudah pemampatan. runner=None -> no-op."""
+    """Fire the PostCompact hook after compressing. runner=None -> no-op."""
     if runner is None:
         return {}
     try:

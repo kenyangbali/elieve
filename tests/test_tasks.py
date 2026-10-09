@@ -264,12 +264,14 @@ class TestLoopIntegration(unittest.TestCase):
         cfg = {"enabled": True, "max_tasks": 64, "summary_max_chars": 300}
         cfg.update(kw)
         with mock.patch.object(LOOP, "get_api_key", return_value="test-key"):
-            return LOOP.HermesLoop(task="t", outdir=outdir, tasks_cfg=cfg)
+            return LOOP.HermesLoop(task="t", outdir=outdir,
+                                   model="ag/gemini-3-flash", tasks_cfg=cfg)
 
     def _run_once(self, loop):
         captured = {}
 
-        def fake_call(messages, model, api_key, tools=None):
+        def fake_call(messages, model, provider_cfg, api_key=None,
+                      tools=None):
             captured["system"] = messages[0]["content"]
             captured["tool_schemas"] = [s["function"]["name"]
                                        for s in (tools or [])]

@@ -7,6 +7,30 @@ model: ag/claude-opus-4-6-thinking   # audit berat (default)
 
 max_steps: 40
 
+# Provider: OpenAI-compatible endpoint + key source (hermes/providers.py).
+# What used to be personal hardcode (127.0.0.1:20128, the 9router sqlite key,
+# ag/*-only models) is now plain configuration — swap this block to use any
+# other provider (see configs/example.yaml).
+provider:
+  base_url: http://127.0.0.1:20128/v1
+  key_provider: "9router"   # read ~/.9router/db/data.sqlite (table apiKeys, name='Default Key')
+  api_key_env: ""           # used only when key_provider is empty: NAME of env var holding the key
+  model: ag/claude-opus-4-6-thinking   # canonical; top-level `model:` above still overrides
+  timeout_s: 180
+
+# Model policy: allow/forbid lists, trailing `*` = prefix wildcard.
+# Empty/missing = unrestricted. forbid wins over allow.
+# Replaces the old hardcoded ag/*-vs-bns/*/oc/* checks in code.
+model_policy:
+  allow: ["ag/*"]
+  forbid: ["bns/*", "oc/*"]
+
+# Tool sandbox: the agent's working root (absolute). /tmp is always allowed too.
+workspace_root: /home/hatch/workspace
+
+# Default system-prompt language: en | id ('system_prompt' below still overrides).
+language: id
+
 # Tool yang boleh dipakai profil ini (subset dari hermes/tools).
 tools:
   - read_file

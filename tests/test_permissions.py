@@ -41,7 +41,12 @@ class FakePost:
         return self.responses.pop(0)
 
 
-def gate_with(responses=(), fail_with=None, tmp=None, **cfg):
+# Policy equivalent of the old hardcoded "ag/* only" classifier rule.
+POLICY = {"allow": ["ag/*"], "forbid": ["bns/*", "oc/*"]}
+
+
+def gate_with(responses=(), fail_with=None, tmp=None, model_policy=None,
+              **cfg):
     base = {
         "enabled": True,
         "classifier_model": "ag/gemini-3-flash",
@@ -60,6 +65,7 @@ def gate_with(responses=(), fail_with=None, tmp=None, **cfg):
         main_api_key="key-utama",
         audit_path=os.path.join(tmp, "permission_audit.jsonl"),
         post_fn=fake,
+        model_policy=model_policy,
     )
     return gate, fake, tmp
 
@@ -216,13 +222,21 @@ class TestAuditLog(unittest.TestCase):
 class TestModelValidation(unittest.TestCase):
     def test_forbidden_prefix_rejected(self):
         with self.assertRaises(ValueError):
-            gate_with(classifier_model="bns/deepseek-v4.1-flash")
+            gate_with(classifier_model="bns/deepseek-v4.1-flash",
+                      model_policy=POLICY)
         with self.assertRaises(ValueError):
-            gate_with(classifier_model="oc/muse-spark-1.3")
+            gate_with(classifier_model="oc/muse-spark-1.3",
+                      model_policy=POLICY)
 
-    def test_non_ag_rejected_for_9router(self):
+    def test_non_ag_rejected_for_main_provider(self):
         with self.assertRaises(ValueError):
-            gate_with(classifier_model="gpt-4o")
+            gate_with(classifier_model="gpt-4o", model_policy=POLICY)
+
+    def test_empty_policy_allows_any_classifier_model(self):
+        # No policy = unrestricted (the framework default).
+        gate, _, _ = gate_with(classifier_model="model-bebas-31b",
+                               model_policy={})
+        self.assertTrue(gate.classifier_active())
 
     def test_custom_base_allows_any_model(self):
         # api_base custom -> model bebas pilihan user (tanpa validasi ag/*)
@@ -237,7 +251,8 @@ class TestLoopIntegration(unittest.TestCase):
     def _loop(self, **kw):
         with mock.patch.object(LOOP, "get_api_key", return_value="k"):
             loop = LOOP.HermesLoop(
-                task="t", outdir=tempfile.mkdtemp(), **kw)
+                task="t", outdir=tempfile.mkdtemp(),
+                model="ag/gemini-3-flash", **kw)
         return loop
 
     def test_gated_tool_deny_message(self):

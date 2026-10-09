@@ -26,6 +26,11 @@ from hermes.compaction import (  # noqa: E402
     micro_compact,
     prune_middle,
 )
+from hermes.providers import ProviderConfig, check_model_allowed  # noqa: E402
+
+# Policy equivalent of the old hardcoded "ag/* only, bns/*/oc/* rejected"
+# rule — now threaded explicitly instead of baked into the code.
+POLICY = {"allow": ["ag/*"], "forbid": ["bns/*", "oc/*"]}
 
 
 def make_session(n_turns=10, tool_chars=5000, prefix_len=2):
@@ -243,7 +248,19 @@ class TestFullCompact(unittest.TestCase):
                     "gpt-4o"):
             with self.assertRaises(ValueError, msg=bad):
                 full_compact(msgs, model=bad, api_key="DUMMY",
-                             post_fn=self._fake_post())
+                             post_fn=self._fake_post(),
+                             model_policy=POLICY)
+
+    def test_empty_policy_allows_any_model(self):
+        # No policy = unrestricted (the framework default).
+        def post(url, payload, api_key, timeout):
+            return 200, json.dumps(
+                {"choices": [{"message": {"role": "assistant",
+                                           "content": "ringkasan ok"}}]})
+        msgs = make_session(4)
+        out = full_compact(msgs, model="gpt-4o", api_key="DUMMY",
+                           post_fn=post, model_policy={}, keep_recent=2)
+        self.assertIn("[COMPACTED]", out[2]["content"])
 
     def test_nothing_to_compact_returns_copy(self):
         msgs = make_session(3, tool_chars=100)
@@ -299,28 +316,32 @@ class TestContextCompactorClass(unittest.TestCase):
 
     def test_rejects_forbidden_cache_model(self):
         with self.assertRaises(ValueError):
-            ContextCompactor(cache_model="bns/x")
+            ContextCompactor(cache_model="bns/x", model_policy=POLICY)
 
 
 class TestLoopIntegration(unittest.TestCase):
     def test_call_model_returns_message_and_usage(self):
         import hermes.loop as loopmod
-        orig = loopmod._post_json
+        # call_model uses the name imported into hermes.loop's namespace
+        orig = loopmod.post_chat_completions
         try:
-            def fake_post(url, headers, payload, timeout):
+            def fake_post(cfg, payload, api_key=None, timeout=None):
                 assert "tools" in payload
                 return 200, json.dumps({
                     "choices": [{"message": {"role": "assistant",
                                              "content": "halo"}}],
                     "usage": {"prompt_tokens": 123, "completion_tokens": 4},
                 })
-            loopmod._post_json = fake_post
+            loopmod.post_chat_completions = fake_post
+            cfg = ProviderConfig(base_url="http://127.0.0.1:1/v1",
+                                 api_key_env="HERMES_TEST_KEY")
             msg, usage = loopmod.call_model(
-                [{"role": "user", "content": "hi"}], "ag/gemini-3-flash", "K")
+                [{"role": "user", "content": "hi"}], "ag/gemini-3-flash",
+                cfg, api_key="K")
             self.assertEqual(msg["content"], "halo")
             self.assertEqual(usage["prompt_tokens"], 123)
         finally:
-            loopmod._post_json = orig
+            loopmod.post_chat_completions = orig
 
     def test_compaction_config_block(self):
         import hermes.loop as loopmod
@@ -331,8 +352,9 @@ class TestLoopIntegration(unittest.TestCase):
         self.assertTrue(comp.get("enabled"))
         self.assertEqual(comp["thresholds"], [70, 80, 85, 90, 95])
         self.assertTrue(comp["summarizer_model"].startswith("ag/"))
-        # summarizer config harus lolos validasi loop
-        loopmod._validate_compaction_model(comp["summarizer_model"])
+        # summarizer config harus lolos validasi policy dari YAML
+        check_model_allowed(comp["summarizer_model"],
+                            cfg.get("model_policy"))
 
 
 class TestSimulation40Turn(unittest.TestCase):

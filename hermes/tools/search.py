@@ -39,8 +39,8 @@ SEARCH_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "grep",
-            "description": "Cari pattern (regex, pakai rg bila ada) di file/direktori. "
-            "Path WAJIB absolut di bawah /home/hatch/workspace atau /tmp.",
+            "description": "Search a regex pattern (uses rg when available) in a file/directory. "
+            "Path MUST be absolute and under the configured workspace root or /tmp.",
             "parameters": {
                 "type": "object",
                 "properties": {

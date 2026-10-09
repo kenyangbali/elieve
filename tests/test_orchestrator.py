@@ -20,13 +20,27 @@ from hermes.orchestrator import (  # noqa: E402
     WORKER_ENV_FLAG,
     is_orchestrator_active,
 )
+from hermes.providers import ProviderConfig  # noqa: E402
 import hermes.loop as LOOP  # noqa: E402
+
+# Policy equivalent of the old hardcoded "ag/* only" planner rule.
+POLICY = {"allow": ["ag/*"], "forbid": ["bns/*", "oc/*"]}
+
+
+def make_provider(**kw):
+    params = dict(
+        base_url="http://127.0.0.1:1/v1",
+        api_key_env="HERMES_TEST_ORCH_KEY",
+        model="ag/gemini-3-flash",
+    )
+    params.update(kw)
+    return ProviderConfig(**params)
 
 
 def make_orch(**kw):
     params = dict(
         orchestrator_model="ag/gemini-3-flash",
-        api_key="kunci-palsu",
+        provider_cfg=make_provider(),
         worker_model="ag/gemini-3-flash",
         max_workers=4,
     )
@@ -61,44 +75,73 @@ class ActiveTest(unittest.TestCase):
 class ValidationTest(unittest.TestCase):
     def test_bns_ditolak(self):
         with self.assertRaises(OrchestratorError):
-            make_orch(orchestrator_model="bns/deepseek-v4.1-flash")
+            make_orch(orchestrator_model="bns/deepseek-v4.1-flash",
+                      model_policy=POLICY)
 
     def test_oc_ditolak(self):
         with self.assertRaises(OrchestratorError):
-            make_orch(orchestrator_model="oc/muse-spark-1.3")
+            make_orch(orchestrator_model="oc/muse-spark-1.3",
+                      model_policy=POLICY)
 
-    def test_non_ag_ditolak_via_9router(self):
+    def test_non_ag_ditolak_dengan_policy(self):
         with self.assertRaises(OrchestratorError):
-            make_orch(orchestrator_model="gpt-4o")
+            make_orch(orchestrator_model="gpt-4o", model_policy=POLICY)
 
     def test_ag_lolos(self):
-        o = make_orch(orchestrator_model="ag/gemini-3.1-pro")
+        o = make_orch(orchestrator_model="ag/gemini-3.1-pro",
+                      model_policy=POLICY)
         self.assertEqual(o.orchestrator_model, "ag/gemini-3.1-pro")
+
+    def test_tanpa_policy_model_bebas(self):
+        # Empty policy = unrestricted (the framework default).
+        o = make_orch(orchestrator_model="model-bebas-31b")
+        self.assertEqual(o.orchestrator_model, "model-bebas-31b")
 
     def test_model_kosong_ditolak(self):
         with self.assertRaises(OrchestratorError):
             make_orch(orchestrator_model="")
 
-    def test_custom_base_model_bebas(self):
+    def test_custom_provider_model_bebas(self):
         with mock.patch.dict(os.environ, {"ORCH_KEY": "sekret"}):
-            o = make_orch(orchestrator_model="model-bebas-31b",
-                          api_base="https://contoh.invalid/v1",
-                          api_key_env="ORCH_KEY")
-        self.assertTrue(o.api_url.startswith("https://contoh.invalid"))
+            o = make_orch(
+                orchestrator_model="model-bebas-31b",
+                provider_cfg=make_provider(
+                    base_url="https://contoh.invalid/v1",
+                    api_key_env="ORCH_KEY", model="model-bebas-31b"))
+        self.assertTrue(
+            o.provider_cfg.base_url.startswith("https://contoh.invalid"))
 
-    def test_custom_base_tanpa_env_ditolak(self):
+    def test_legacy_base_tanpa_env_ditolak(self):
+        # Legacy keys live on from_config now: base without key env -> error.
         with self.assertRaises(OrchestratorError):
-            make_orch(orchestrator_model="model-bebas",
-                      api_base="https://contoh.invalid/v1",
-                      api_key_env="")
+            Orchestrator.from_config(
+                {"orchestrator_model": "model-bebas",
+                 "orchestrator_api_base": "https://contoh.invalid/v1",
+                 "orchestrator_api_key_env": ""},
+                task="t", outdir="/tmp/x", model="m",
+                provider_cfg=make_provider())
 
-    def test_custom_base_env_kosong_ditolak(self):
+    def test_legacy_base_env_kosong_ditolak(self):
         with mock.patch.dict(os.environ, {}, clear=False):
             os.environ.pop("ORCH_KEY_KOSONG_XYZ", None)
             with self.assertRaises(OrchestratorError):
-                make_orch(orchestrator_model="model-bebas",
-                          api_base="https://contoh.invalid/v1",
-                          api_key_env="ORCH_KEY_KOSONG_XYZ")
+                Orchestrator.from_config(
+                    {"orchestrator_model": "model-bebas",
+                     "orchestrator_api_base": "https://contoh.invalid/v1",
+                     "orchestrator_api_key_env": "ORCH_KEY_KOSONG_XYZ"},
+                    task="t", outdir="/tmp/x", model="m",
+                    provider_cfg=make_provider())
+
+    def test_legacy_base_dengan_env_lolos(self):
+        with mock.patch.dict(os.environ, {"ORCH_KEY": "sekret"}):
+            o = Orchestrator.from_config(
+                {"orchestrator_model": "model-bebas",
+                 "orchestrator_api_base": "https://contoh.invalid/v1",
+                 "orchestrator_api_key_env": "ORCH_KEY"},
+                task="t", outdir="/tmp/x", model="m",
+                provider_cfg=make_provider())
+        self.assertTrue(o.mandor_provider.base_url.startswith(
+            "https://contoh.invalid"))
 
 
 class PlanTest(unittest.TestCase):
@@ -196,7 +239,7 @@ class SpawnMergeTest(unittest.TestCase):
         o = make_orch(plan_fn=fake_plan_3, spawn_fn=spawn_kosong)
         out_md = o.run("t", outdir)
         with open(out_md) as f:
-            self.assertIn("tidak ada OUT.md", f.read())
+            self.assertIn("(no OUT.md from this worker)", f.read())
 
 
 class FromConfigTest(unittest.TestCase):
@@ -205,18 +248,44 @@ class FromConfigTest(unittest.TestCase):
             {"orchestrator_model": "ag/gemini-3-flash",
              "max_workers": 2, "worker_max_steps": 10},
             task="t", outdir="/tmp/x", model="ag/gemini-3.1-pro",
-            api_key="k")
+            provider_cfg=make_provider(),
+            model_policy=POLICY,
+        )
         self.assertEqual(o.max_workers, 2)
         self.assertEqual(o.worker_max_steps, 10)
         # worker_model kosong -> pakai model utama
         self.assertEqual(o.worker_model, "ag/gemini-3.1-pro")
+
+    def test_worker_config_meneruskan_provider_dan_policy(self):
+        # Worker config forwards provider/model_policy/workspace/language
+        # so workers run against any provider.
+        outdir = tempfile.mkdtemp()
+        prov = make_provider(base_url="https://contoh.invalid/v1")
+        o = Orchestrator.from_config(
+            {"orchestrator_model": "ag/gemini-3-flash"},
+            task="t", outdir=outdir, model="ag/gemini-3-flash",
+            provider_cfg=prov, model_policy=POLICY,
+            workspace_root="/tmp/ws-uji", language="id",
+        )
+        wdir = os.path.join(outdir, "w0")
+        path = o._worker_config_path(wdir)
+        import yaml
+        cfg = yaml.safe_load(open(path))
+        self.assertEqual(cfg["provider"]["base_url"],
+                         "https://contoh.invalid/v1")
+        self.assertEqual(cfg["model_policy"], POLICY)
+        self.assertEqual(cfg["workspace_root"], "/tmp/ws-uji")
+        self.assertEqual(cfg["language"], "id")
+        # workers must not become planners (defense in depth)
+        self.assertFalse(cfg["orchestrator"]["enabled"])
 
 
 class NoExecTest(unittest.TestCase):
     def _loop(self, **kw):
         with mock.patch.object(LOOP, "get_api_key", return_value="k"):
             loop = LOOP.HermesLoop(
-                task="t", outdir=tempfile.mkdtemp(), **kw)
+                task="t", outdir=tempfile.mkdtemp(),
+                model="ag/gemini-3-flash", **kw)
         return loop
 
     def test_default_ada_exec(self):

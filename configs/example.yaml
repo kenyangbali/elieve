@@ -1,0 +1,51 @@
+# Example hermes-agent config — generic OpenAI-compatible provider.
+# Run: python3 -m hermes.loop --config configs/example.yaml --task "..." --outdir ./runs/demo
+#
+# This file documents every core block the loop understands. Only `provider`
+# (endpoint + key source) is truly required; everything else has safe defaults.
+
+# --- Provider ---------------------------------------------------------
+# Any OpenAI-compatible chat-completions endpoint. The key itself is NEVER
+# written here — give the NAME of an environment variable that holds it.
+provider:
+  base_url: https://api.openai.com/v1
+  api_key_env: OPENAI_API_KEY   # e.g. export OPENAI_API_KEY=sk-...
+  # key_provider: "9router"     # alternative: read the key from a local
+                                # 9router sqlite DB (~/.9router/db/data.sqlite,
+                                # table apiKeys, row name='Default Key')
+  model: gpt-4o-mini            # canonical model; top-level `model:` below overrides
+  timeout_s: 180
+
+# --- Model policy ------------------------------------------------------
+# allow/forbid lists with trailing-`*` prefix wildcards. `forbid` wins over
+# `allow`. Empty/missing lists = unrestricted.
+model_policy:
+  allow: []
+  forbid: []
+
+# Optional: overrides provider.model (canonical model lives in provider:).
+# model: gpt-4o-mini
+
+max_steps: 40
+
+# Sandbox root for tools (the absolute path is stored; a relative path is
+# resolved from the process cwd). /tmp is always allowed as a second root.
+workspace_root: ./workspace
+
+# Default system-prompt language: en | id.
+language: en
+
+# Custom system prompt (null = built-in default for `language`).
+system_prompt: null
+
+# --- Local Ollama example -----------------------------------------------
+# provider:
+#   base_url: http://localhost:11434/v1
+#   api_key_env: OLLAMA_API_KEY   # Ollama needs no real key — export any
+#                                 # dummy value, e.g. export OLLAMA_API_KEY=x
+#   model: llama3.1
+#   timeout_s: 300
+
+# --- Optional blocks ------------------------------------------------------
+# compaction / memory / permissions / hooks / tasks / accounting /
+# orchestrator — see configs/bug-hunter.yaml for a fully worked example.

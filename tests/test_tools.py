@@ -61,6 +61,17 @@ class TestReadTools(unittest.TestCase):
 
 
 class TestExecTool(unittest.TestCase):
+    def setUp(self):
+        # run_exec shells out with cwd=workspace root; point it at /tmp
+        # (always exists) and restore afterwards.
+        from hermes import tools as _tools
+        self._prev_root = _tools.get_workspace_root()
+        _tools.configure_roots("/tmp")
+
+    def tearDown(self):
+        from hermes import tools as _tools
+        _tools.configure_roots(self._prev_root)
+
     def test_deny_rm_root(self):
         ok, _ = _exec_allowed("rm -rf /")
         self.assertFalse(ok)

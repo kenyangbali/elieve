@@ -1,33 +1,28 @@
 #!/usr/bin/env python3
-"""hermes.loop — ReAct loop baseline v1 (port rapi dari hermes-hunter/hunter.py).
+"""hermes.loop — baseline v1 ReAct loop.
 
-Pola: task -> chat -> tool_calls -> eksekusi tool -> umpan balik -> ...
-sampai model selesai (jawaban akhir tanpa tool call) atau max-steps.
+Pattern: task -> chat -> tool_calls -> run tools -> feed back -> ...
+until the model finishes (final answer without tool calls) or max-steps.
 
-Aturan model (perintah Bayu 2026-10-08):
-  BOLEH: ag/*  (default ag/claude-opus-4-6-thinking buat audit berat,
-                ag/gemini-3.1-pro alternatif kuat,
-                ag/gemini-3-flash buat tugas ringan)
-  DILARANG KERAS: bns/* dan oc/* (jangan sentuh kuota itu).
+Everything environment-specific is CONFIGURATION (see
+configs/example.yaml): the provider (endpoint + key source), the model
+allow/forbid policy, the sandbox workspace root, and the default prompt
+language. Nothing personal is hardcoded here.
 
-API key dibaca saat runtime dari ~/.9router/db/data.sqlite
-(tabel apiKeys, baris name='Default Key'). TIDAK PERNAH di-hardcode,
-di-print, atau ditulis ke file mana pun.
-
-Output per run (di --outdir):
-  OUT.md        — laporan akhir model
-  progress.json — step terakhir (konvensi resumability)
+Per-run output (in --outdir):
+  OUT.md        — the model's final report
+  progress.json — last step (resumability convention)
 """
 
 import argparse
 import json
 import os
 import re
-import sqlite3
 import sys
 import time
 from datetime import datetime, timezone
 
+from . import tools
 from .tools import (
     DISPATCH, TOOL_SCHEMAS, ToolError,
     bind_memory, unbind_memory,
@@ -62,137 +57,42 @@ from .compaction import (
     full_compact,
     micro_compact,
 )
-
-API_URL = "http://127.0.0.1:20128/v1/chat/completions"
-DB_PATH = os.path.expanduser("~/.9router/db/data.sqlite")
-
-ALLOWED_MODELS = {
-    "ag/claude-opus-4-6-thinking": "audit berat (default)",
-    "ag/gemini-3.1-pro": "alternatif kuat",
-    "ag/gemini-3-flash": "cepat, tugas ringan",
-}
-DEFAULT_MODEL = "ag/claude-opus-4-6-thinking"
-FORBIDDEN_PREFIXES = ("bns/", "oc/")
+from .providers import (
+    ProviderConfig,
+    ProviderKeyError,
+    check_model_allowed,
+    post_chat_completions,
+    resolve_api_key,
+)
+from .prompts import get_system_prompt
 
 MODEL_CALL_DELAY_S = 3
-REQUEST_TIMEOUT_S = 180
-
-SYSTEM_PROMPT = """Kamu Hermes, bug hunter yang teliti dan jujur. Misi: cari bug keamanan nyata.
-
-ATURAN KERAS (melanggar = gagal):
-1. Hanya yang IN-SCOPE dari task. Jangan melebar ke target lain.
-2. Setiap temuan WAJIB didukung bukti file:baris persis yang kamu baca SENDIRI via tool. DILARANG mengarang, menebak, atau mengklaim tanpa bukti.
-3. DILARANG tindakan destruktif: jangan hapus/ubah file, jangan menyerang sistem, jangan exfiltrate data.
-4. Hanya boleh akses path di bawah /home/hatch/workspace atau /tmp. Selalu pakai ABSOLUTE path.
-5. Jika ragu apakah sesuatu bug atau bukan, catat sebagai "perlu verifikasi", jangan dipaksakan jadi temuan.
-
-CARA KERJA:
-- Gunakan function call yang tersedia: read_file, list_dir, grep, exec, remember, task_update.
-- Tool `remember`: simpan pelajaran/pola penting ke ingatan sesi (MEMORY.md).
-  JANGAN PERNAH simpan API key, token, password, atau kredensial apa pun.
-- Tool `task_update`: kelola daftar task (add/set/list). Buat task untuk
-  tiap langkah kerja berarti, tandai in_progress saat dikerjakan dan
-  completed saat selesai. Satu task in_progress dalam satu waktu.
-- Setelah semua bukti terkumpul (atau tidak ada temuan), BERHENTI memanggil tool dan tulis LAPORAN AKHIR sebagai jawaban teks biasa — itu yang akan disimpan sebagai hasil.
-- Format laporan akhir:
-  ## <judul temuan>
-  - Lokasi: `path/file:baris`
-  - Bukti: <kutipan kode / hasil observasi>
-  - Dampak: <apa yang bisa dilakukan penyerang>
-  - PoC: <langkah reproduksi, bila ada>
-  Ulangi per temuan. Jika TIDAK ADA temuan: tulis "TIDAK ADA TEMUAN" + ringkasan area yang sudah diperiksa.
-- Bahasa laporan: Indonesia. Jujur soal keterbatasan (mis. "belum terverifikasi runtime").
-
-CADANGAN: bila function calling tidak tersedia, panggil tool lewat blok kode persis format ini:
-```tool
-{"name": "read_file", "arguments": {"path": "/home/hatch/workspace/..."}}
-```
-"""
 
 
 class RateLimited(Exception):
     pass
 
 
-def validate_model(model: str) -> str:
-    """Tolak prefix terlarang sebelum request dibuat."""
-    low = model.strip().lower()
-    for prefix in FORBIDDEN_PREFIXES:
-        if low.startswith(prefix):
-            sys.stderr.write(
-                f"ERROR: model '{model}' DILARANG — jangan sentuh kuota bns/* atau oc/*.\n"
-                f"Model boleh-pakai: {', '.join(sorted(ALLOWED_MODELS))}\n"
-            )
-            sys.exit(2)
-    return model.strip()
+def get_api_key(provider_cfg=None):
+    """Resolve the provider API key (CLI wrapper: exit 2 on failure).
 
-
-def _validate_compaction_model(model: str) -> str:
-    """Summarizer compaction HANYA boleh ag/*. bns/*/oc/* DITOLAK."""
-    low = (model or "").strip().lower()
-    for prefix in FORBIDDEN_PREFIXES:
-        if low.startswith(prefix):
-            sys.stderr.write(
-                f"ERROR: summarizer '{model}' DILARANG — jangan sentuh "
-                f"kuota bns/* atau oc/*.\n"
-            )
-            sys.exit(2)
-    if not low.startswith("ag/"):
-        sys.stderr.write(
-            f"ERROR: summarizer harus model ag/* (dapat '{model}').\n"
-        )
-        sys.exit(2)
-    return model.strip()
-
-
-def get_api_key(db_path: str = DB_PATH) -> str:
+    Library equivalent: providers.resolve_api_key (raises ProviderKeyError).
+    The key value is never printed or logged.
+    """
     try:
-        con = sqlite3.connect(db_path)
-        row = con.execute(
-            "SELECT key FROM apiKeys WHERE name='Default Key' LIMIT 1"
-        ).fetchone()
-        con.close()
-    except Exception as e:
-        sys.stderr.write(f"ERROR: gagal baca DB 9router ({db_path}): {e}\n")
+        return resolve_api_key(provider_cfg)
+    except ProviderKeyError as e:
+        sys.stderr.write(f"ERROR: {e}\n")
         sys.exit(2)
-    if not row or not row[0]:
-        sys.stderr.write(
-            "ERROR: baris name='Default Key' tidak ada / kosong di tabel apiKeys.\n"
-        )
-        sys.exit(2)
-    return row[0]
 
 
-def _post_json(url, headers, payload, timeout):
-    try:
-        import requests  # noqa
+def call_model(messages, model, provider_cfg, api_key=None, tools=None):
+    """Send a chat completion; return (message, usage).
 
-        r = requests.post(url, headers=headers, json=payload, timeout=timeout)
-        return r.status_code, r.text
-    except ImportError:
-        import urllib.request
-        import urllib.error
-
-        req = urllib.request.Request(
-            url,
-            data=json.dumps(payload).encode("utf-8"),
-            headers=headers,
-            method="POST",
-        )
-        try:
-            with urllib.request.urlopen(req, timeout=timeout) as resp:
-                return resp.status, resp.read().decode("utf-8", "replace")
-        except urllib.error.HTTPError as e:
-            return e.code, e.read().decode("utf-8", "replace")
-
-
-def call_model(messages, model, api_key, tools=None):
-    """Kirim chat completion; kembalikan (message, usage).
-
-    `usage` berisi prompt_tokens/completion_tokens bila provider
-    memberikannya, else dict kosong (pemanggil pakai estimasi chars/4).
-    `tools`: daftar schema function-call; default TOOL_SCHEMAS global
-    (worker read-only meneruskan subset tanpa `exec`).
+    `usage` holds prompt_tokens/completion_tokens when the provider
+    sends them, else an empty dict (callers fall back to chars/4).
+    `tools`: function-call schemas; default is the global TOOL_SCHEMAS
+    (read-only workers pass a subset without `exec`).
     """
     payload = {
         "model": model,
@@ -201,31 +101,29 @@ def call_model(messages, model, api_key, tools=None):
         "tool_choice": "auto",
         "stream": False,
     }
-    status, text = _post_json(
-        API_URL,
-        {"Authorization": "Bearer " + api_key, "Content-Type": "application/json"},
-        payload,
-        REQUEST_TIMEOUT_S,
-    )
+    status, text = post_chat_completions(
+        provider_cfg, payload, api_key=api_key)
     if status == 429:
-        raise RateLimited("HTTP 429 dari 9router — berhenti rapi tanpa retry.")
+        raise RateLimited(
+            "HTTP 429 from provider — stopping cleanly without retry.")
     if status >= 400:
-        raise RuntimeError(f"9router HTTP {status}: {text[:500]}")
+        raise RuntimeError(f"provider HTTP {status}: {text[:500]}")
     try:
         data = json.loads(text)
         message = data["choices"][0]["message"]
         usage = data.get("usage") or {}
         return message, usage
     except Exception as e:
-        raise RuntimeError(f"respon 9router tidak bisa di-parse: {e} :: {text[:300]}")
+        raise RuntimeError(
+            f"provider response could not be parsed: {e} :: {text[:300]}")
 
 
 def _fallback_tool_call(text: str, dispatch=None):
-    """Cadangan bila model tidak pakai native function calling:
-    blok ```tool {"name": ..., "arguments": {...}}```
+    """Fallback when the model skips native function calling:
+    a ```tool {"name": ..., "arguments": {...}}``` block.
 
-    `dispatch`: mapping tool yang diizinkan (default DISPATCH global;
-    worker read-only meneruskan subset tanpa `exec`)."""
+    `dispatch`: the allowed tool mapping (default is the global DISPATCH;
+    read-only workers pass a subset without `exec`)."""
     m = re.search(r"```tool\s*\n(\{.*?\})\s*```", text, re.S)
     if not m:
         return None
@@ -241,26 +139,37 @@ def _fallback_tool_call(text: str, dispatch=None):
 
 
 class HermesLoop:
-    """Satu sesi ReAct: kirim task, iterasi tool call sampai jawaban akhir."""
+    """One ReAct session: send the task, iterate tool calls to a final answer."""
 
-    def __init__(self, task, outdir, model=DEFAULT_MODEL, max_steps=40,
-                 system_prompt=SYSTEM_PROMPT, compaction_cfg=None,
+    def __init__(self, task, outdir, model=None, max_steps=40,
+                 system_prompt=None, compaction_cfg=None,
                  memory_cfg=None, permissions_cfg=None, no_exec=False,
                  hooks_cfg=None, tasks_cfg=None,
-                 accounting_cfg=None):
+                 accounting_cfg=None, provider_cfg=None, model_policy=None):
         self.task = task
         self.outdir = outdir
-        self.model = validate_model(model)
+        # Provider + model policy come from configuration (never hardcoded).
+        self.provider_cfg = (provider_cfg if provider_cfg is not None
+                             else ProviderConfig())
+        self.model_policy = dict(model_policy or {})
+        raw_model = (model or self.provider_cfg.model or "").strip()
+        if not raw_model:
+            raise ValueError(
+                "no model configured: pass --model, set top-level 'model:' "
+                "in the config, or set provider.model.")
+        # Policy-based validation (replaces the old hardcoded allow/forbid).
+        self.model = check_model_allowed(raw_model, self.model_policy)
         self.max_steps = max_steps
-        self.system_prompt = system_prompt
-        self.api_key = get_api_key()
-        # Gap 1 — hook lifecycle (deterministik, tidak bisa di-skip model).
-        # hooks_cfg None/kosong -> semua event no-op.
+        self.system_prompt = (system_prompt if system_prompt is not None
+                              else get_system_prompt("en"))
+        self.api_key = get_api_key(self.provider_cfg)
+        # Gap 1 — hook lifecycle (deterministic, the model cannot skip it).
+        # hooks_cfg None/empty -> every event is a no-op.
         self.hooks = HookRunner(hooks_cfg, outdir=outdir)
         self._step = 0
         self._last_tool = None
         self._qc_flags = []
-        # Toolset per-run (Fase 4): worker read-only membuang `exec`.
+        # Per-run toolset (Phase 4): read-only workers drop `exec`.
         self.no_exec = bool(no_exec)
         self.dispatch = dict(DISPATCH)
         if self.no_exec:
@@ -269,7 +178,7 @@ class HermesLoop:
             s for s in TOOL_SCHEMAS
             if s.get("function", {}).get("name") in self.dispatch
         ]
-        # Konfigurasi compaction (Fase 1); default aman bila config tak ada.
+        # Compaction config (Phase 1); safe defaults when config is absent.
         self.compaction = {
             "enabled": True,
             "context_limit": DEFAULT_CONTEXT_LIMIT,
@@ -282,18 +191,19 @@ class HermesLoop:
         }
         if compaction_cfg:
             self.compaction.update(compaction_cfg)
-        # validasi awal: summarizer wajib ag/* (bns/*/oc/* ditolak di kode)
-        _validate_compaction_model(self.compaction["summarizer_model"])
-        # Gap 3 — akuntansi token/biaya (hermes/accounting.py).
-        # accounting_cfg None/kosong -> enabled default true, cap nonaktif.
-        # context_limit diambil dari config compaction (fallback chars/4
-        # bila provider tak mengirim usage).
+        # Early validation: the summarizer must satisfy the model policy.
+        check_model_allowed(self.compaction["summarizer_model"],
+                            self.model_policy)
+        # Gap 3 — token/cost accounting (hermes/accounting.py).
+        # accounting_cfg None/empty -> enabled by default, cap inactive.
+        # context_limit comes from the compaction config (chars/4 fallback
+        # when the provider sends no usage).
         self.acct = Accounting(
             accounting_cfg,
             outdir=outdir,
             context_limit=self.compaction["context_limit"],
         )
-        # Konfigurasi memory (Fase 2).
+        # Memory config (Phase 2).
         self.memory_cfg = {
             "enabled": True,
             "tidy_every_runs": DEFAULT_TIDY_EVERY_RUNS,
@@ -302,10 +212,11 @@ class HermesLoop:
         }
         if memory_cfg:
             self.memory_cfg.update(memory_cfg)
-        _validate_compaction_model(self.memory_cfg["summarizer_model"])
-        self.memory = None  # AgentMemory dibuat di run() (butuh outdir)
-        # Konfigurasi permission gate (Fase 3). Classifier OPSIONAL:
-        # classifier_model kosong -> auto-off (hanya regex lapisan-0).
+        check_model_allowed(self.memory_cfg["summarizer_model"],
+                            self.model_policy)
+        self.memory = None  # AgentMemory is created in run() (needs outdir)
+        # Permission gate config (Phase 3). The classifier is OPTIONAL:
+        # an empty classifier_model means auto-off (layer-0 regex only).
         self.permissions = {
             "enabled": True,
             "classifier_model": "",
@@ -322,9 +233,11 @@ class HermesLoop:
             deep_model=self.model,
             main_api_key=self.api_key,
             audit_path=os.path.join(outdir, "permission_audit.jsonl"),
+            provider_cfg=self.provider_cfg,
+            model_policy=self.model_policy,
         )
         # Gap 2 — structured task tracking (hermes/tasks.py).
-        # tasks_cfg None/kosong -> enabled default true.
+        # tasks_cfg None/empty -> enabled by default.
         self.tasks_cfg = {
             "enabled": True,
             "max_tasks": DEFAULT_MAX_TASKS,
@@ -341,12 +254,6 @@ class HermesLoop:
             bind_tasks(self.tasks)
         else:
             unbind_tasks()
-        if self.model not in ALLOWED_MODELS:
-            print(
-                f"[hermes] peringatan: '{self.model}' bukan daftar dikenal; "
-                f"yang disarankan: {', '.join(sorted(ALLOWED_MODELS))}",
-                flush=True,
-            )
 
     # -- output ------------------------------------------------------
 
@@ -369,15 +276,15 @@ class HermesLoop:
     # -- accounting (Gap 3) ------------------------------------------
 
     def _accounting_after_call(self, usage, messages, step):
-        """Catat usage tiap selesai call_model + guardrail.
+        """Record usage after each call_model + guardrails.
 
-        - record() ke UsageTracker (fallback estimasi chars/4 bila provider
-          tak mengirim usage; ditandai estimated=True).
-        - warning konteks bila prompt_tokens >= context_warn_pct%.
-        - simpan usage.json berkala tiap 10 step (best effort).
-        - cek run_cost_cap.
-        Kembalikan True bila cap tercapai -> pemanggil menghentikan run
-        dengan rapi (status cost_capped, return 0, bukan crash).
+        - record() into the UsageTracker (chars/4 estimate when the
+          provider sends no usage; flagged estimated=True);
+        - context warning when prompt_tokens >= context_warn_pct%;
+        - periodic usage.json save every 10 steps (best effort);
+        - run_cost_cap check.
+        Returns True when the cap is hit -> the caller stops the run
+        cleanly (status cost_capped, return 0, no crash).
         """
         if not self.acct.enabled:
             return False
@@ -395,19 +302,19 @@ class HermesLoop:
         return False
 
     def _finish_accounting(self):
-        """Gap 3: tulis <outdir>/usage.json + cetak ringkasan ke stdout.
+        """Gap 3: write <outdir>/usage.json + print the summary to stdout.
 
-        Dipanggil di SEMUA jalur keluar run (done/max_steps/error/
-        rate_limited/cost_capped). Best effort — tidak boleh crash-kan run.
+        Called on EVERY run exit path (done/max_steps/error/
+        rate_limited/cost_capped). Best effort — must never crash the run.
         """
         if not self.acct.enabled:
             return
         try:
             path = self.acct.save()
         except Exception as e:
-            print(f"[accounting] gagal tulis usage.json: {e}", flush=True)
+            print(f"[accounting] failed to write usage.json: {e}", flush=True)
         else:
-            print(f"[hermes] usage.json ditulis: {path}", flush=True)
+            print(f"[hermes] usage.json written: {path}", flush=True)
         print(self.acct.summary_text(), flush=True)
 
     # -- tool dispatch -----------------------------------------------
@@ -416,18 +323,18 @@ class HermesLoop:
         try:
             return str(self.dispatch[name](**args))
         except TypeError as e:
-            return f"argumen salah untuk {name}: {e}"
+            return f"wrong arguments for {name}: {e}"
         except ToolError as e:
-            return f"TOOL DITOLAK: {e}"
+            return f"TOOL REJECTED: {e}"
         except Exception as e:
             return f"tool error ({name}): {e}"
 
     def _gated_tool(self, name, args):
-        """Tool call lewat permission gate (Fase 3) SEBELUM dieksekusi.
+        """A tool call through the permission gate (Phase 3) BEFORE running.
 
-        Kembalikan (allowed, result_text). verdict deny/ask -> tool TIDAK
-        dijalankan; model diberi pesan penolakan dan loop lanjut normal
-        (tidak crash).
+        Returns (allowed, result_text). A deny/ask verdict means the tool
+        does NOT run; the model gets the refusal message and the loop
+        continues normally (no crash).
         """
         verdict, reason = self.gate.check(name, args or {})
         if verdict == "deny":
@@ -444,14 +351,14 @@ class HermesLoop:
     # -- hook lifecycle (Gap 1) ---------------------------------------
 
     def _hook_ctx_base(self, extra=None):
-        """Ctx dasar untuk semua hook: step, outdir, task, last_tool, dll."""
+        """Base ctx for every hook: step, outdir, task, last_tool, etc."""
         ctx = {
             "step": self._step,
             "outdir": self.outdir,
             "task": self.task,
             "last_tool": self._last_tool,
             "qc_flags": list(self._qc_flags),
-            # Gap 2: ringkasan task NYATA dari TaskList (bukan placeholder).
+            # Gap 2: the REAL task summary from TaskList (not a placeholder).
             "tasks_summary": self.tasks.summary() if self.tasks else "",
         }
         if extra:
@@ -459,26 +366,27 @@ class HermesLoop:
         return ctx
 
     def _dispatch_tool(self, name, args):
-        """Jalur penuh satu tool call: PreToolUse -> permission gate ->
-        eksekusi -> PostToolUse.
+        """Full path of one tool call: PreToolUse -> permission gate ->
+        execution -> PostToolUse.
 
-        PreToolUse diblokir (allowed=False) -> tool TIDAK dijalankan;
-        model diberi pesan blokir dan loop lanjut normal (tidak crash).
-        Kembalikan teks hasil tool."""
+        A blocked PreToolUse (allowed=False) means the tool does NOT run;
+        the model gets the block message and the loop continues normally
+        (no crash). Returns the tool result text.
+        """
         ctx = self._hook_ctx_base({
             "tool_name": name,
             "tool_args": args or {},
         })
         allowed, reasons = self.hooks.pre_tool_use(ctx)
         if not allowed:
-            reason = "; ".join(r for r in reasons if r) or "ditolak"
+            reason = "; ".join(r for r in reasons if r) or "rejected"
             print(
-                f"[hermes]   hook PreToolUse: BLOKIR {name}: {reason[:160]}",
+                f"[hermes]   hook PreToolUse: BLOCK {name}: {reason[:160]}",
                 flush=True,
             )
             result = f"HOOK DITOLAK oleh PreToolUse: {reason}"
         elif name not in self.dispatch:
-            result = f"tool tidak dikenal: {name}"
+            result = f"unknown tool: {name}"
         else:
             print(f"[hermes]   tool: {name} {str(args)[:120]}", flush=True)
             _ok, result = self._gated_tool(name, args)
@@ -493,37 +401,39 @@ class HermesLoop:
             )
         if post.get("blocked"):
             result = (
-                "[QC] hook PostToolUse menandai output "
-                "(shell blocking gagal).\n" + str(result)
+                "[QC] hook PostToolUse flagged the output "
+                "(shell blocking failed).\n" + str(result)
             )
         return result
 
     def _fire_on_stop(self, status, note=""):
-        """OnStop di semua jalur keluar loop; tidak boleh crash-kan run."""
+        """OnStop on every loop exit path; must never crash the run."""
         try:
             self.hooks.on_stop(
                 self._hook_ctx_base({"status": status, "note": note}))
         except Exception as e:  # belt-and-suspenders
-            print(f"[hermes] hook OnStop gagal: {e}", flush=True)
+            print(f"[hermes] hook OnStop failed: {e}", flush=True)
 
     def _fire_on_error(self, err):
-        """OnError: catat ke errors.jsonl + jalankan hook OnError."""
+        """OnError: log to errors.jsonl + run the OnError hook."""
         try:
             self.hooks.on_error(
                 self._hook_ctx_base({"error": str(err)[:1000]}))
         except Exception as e:  # belt-and-suspenders
-            print(f"[hermes] hook OnError gagal: {e}", flush=True)
+            print(f"[hermes] hook OnError failed: {e}", flush=True)
 
-    # -- compaction (Fase 1) ------------------------------------------
+    # -- compaction (Phase 1) ------------------------------------------
 
     def _summarize_for_compaction(self, messages):
-        """Summarizer untuk pipeline 95%: full_compact via model murah ag/*."""
+        """Summarizer for the 95% pipeline: full_compact via a cheap model."""
         return full_compact(
             messages,
             model=self.compaction["summarizer_model"],
             api_key=self.api_key,
             keep_recent=int(self.compaction["full_compact_keep_recent"]),
             prefix_len=int(self.compaction["prefix_len"]),
+            model_policy=self.model_policy,
+            provider_cfg=self.provider_cfg,
         )
 
     def _maybe_micro_compact(self, messages):
@@ -539,7 +449,7 @@ class HermesLoop:
     def _maybe_threshold_compact(self, messages, prompt_tokens):
         if not self.compaction.get("enabled", True):
             return messages, []
-        # Gap 1: PreCompact sebelum pemampatan, PostCompact sesudahnya.
+        # Gap 1: PreCompact before compressing, PostCompact after.
         ctx = self._hook_ctx_base()
         fire_pre_compact(self.hooks, ctx)
         out, actions = apply_threshold_pipeline(
@@ -557,11 +467,11 @@ class HermesLoop:
     # -- task tracking (Gap 2) ----------------------------------------
 
     def _tasks_block(self):
-        """Blok "## Daftar task" untuk system prompt. Kosong bila tak ada.
+        """The "## Daftar task" block for the system prompt. Empty if none.
 
-        Disuntik ulang SETIAP turn sebelum panggilan model agar state task
-        survive compaction: system prompt masuk prefix_len yang tidak
-        pernah disentuh pipeline compaction (lihat hermes/tasks.py).
+        Re-injected FRESH every turn before the model call so task state
+        survives compaction: the system prompt sits in the prefix_len zone
+        that the compaction pipeline never touches (see hermes/tasks.py).
         """
         if not self.tasks:
             return ""
@@ -571,7 +481,7 @@ class HermesLoop:
             return ""
         return "\n\n## Daftar task\n" + summary
 
-    # -- memory (Fase 2) --------------------------------------------------
+    # -- memory (Phase 2) --------------------------------------------------
 
     def _memory_path(self):
         return os.path.join(self.outdir, "MEMORY.md")
@@ -580,7 +490,7 @@ class HermesLoop:
         return os.path.join(self.outdir, ".memory_counter")
 
     def _setup_memory(self):
-        """Buat/bind AgentMemory, autoDream tiap N run, recall konteks."""
+        """Create/bind AgentMemory, autoDream every N runs, recall context."""
         if not self.memory_cfg.get("enabled", True):
             unbind_memory()
             return ""
@@ -589,7 +499,7 @@ class HermesLoop:
             max_fact_chars=int(self.memory_cfg["max_fact_chars"]),
         )
         bind_memory(self.memory)
-        # autoDream: counter per outdir; tidy tiap N run.
+        # autoDream: per-outdir counter; tidy every N runs.
         counter = 0
         cpath = self._memory_counter_path()
         try:
@@ -602,19 +512,21 @@ class HermesLoop:
             with open(cpath, "w") as f:
                 f.write(str(counter))
         except OSError as e:
-            print(f"[hermes] peringatan: counter memory gagal ditulis: {e}",
+            print(f"[hermes] warning: memory counter write failed: {e}",
                   flush=True)
         every = max(1, int(self.memory_cfg["tidy_every_runs"]))
         if counter % every == 0:
             try:
-                print(f"[hermes] autoDream: tidy MEMORY.md (run ke-{counter}) ...",
+                print(f"[hermes] autoDream: tidying MEMORY.md (run #{counter}) ...",
                       flush=True)
                 self.memory.tidy(
                     self.api_key,
                     model=self.memory_cfg["summarizer_model"],
+                    model_policy=self.model_policy,
+                    provider_cfg=self.provider_cfg,
                 )
             except Exception as e:
-                print(f"[hermes] autoDream gagal (lanjut tanpa tidy): {e}",
+                print(f"[hermes] autoDream failed (continuing without tidy): {e}",
                       flush=True)
         return self.memory.recall()
 
@@ -622,20 +534,20 @@ class HermesLoop:
 
     def run(self) -> int:
         os.makedirs(self.outdir, exist_ok=True)
-        # Fase 2: ingatan sesi lalu disuntik ke system prompt.
+        # Phase 2: previous-session memory is injected into the system prompt.
         recalled = self._setup_memory()
         system_prompt = self.system_prompt
         if recalled:
             system_prompt += "\n\n## Ingatan sesi lalu\n" + recalled
         if self.no_exec:
-            # Fase 4: worker read-only — model wajib tahu exec tak tersedia.
+            # Phase 4: read-only worker — the model must know exec is gone.
             system_prompt += (
                 "\n\nMODE BACA-SAJA: tool `exec` TIDAK tersedia di sesi ini. "
                 "Jangan memanggil atau memintanya; gunakan read_file, "
                 "list_dir, grep, dan remember."
             )
-        # Gap 2: basis system prompt statis; blok task disuntik segar tiap
-        # turn (lihat _tasks_block) agar survive compaction.
+        # Gap 2: static system-prompt base; the task block is re-injected
+        # fresh each turn (see _tasks_block) so it survives compaction.
         base_system_prompt = system_prompt
         messages = [
             {"role": "system", "content": system_prompt},
@@ -655,21 +567,23 @@ class HermesLoop:
         step = 0
         while step < self.max_steps:
             step += 1
-            self._step = step  # hook ctx selalu tahu step berjalan
+            self._step = step  # hook ctx always knows the running step
             if step > 1:
                 time.sleep(MODEL_CALL_DELAY_S)
             print(
                 f"[hermes] step {step}/{self.max_steps} -> {self.model} ...",
                 flush=True,
             )
-            # Lapis 1: microcompaction tiap turn SEBELUM request (tanpa LLM)
+            # Layer 1: micro-compaction every turn BEFORE the request (no LLM)
             messages = self._maybe_micro_compact(messages)
-            # Gap 2: suntik ringkasan task segar ke system prompt tiap turn.
-            # System prompt masuk prefix compaction -> tidak pernah dipotong.
+            # Gap 2: inject a fresh task summary into the system prompt each
+            # turn. The system prompt sits in the compaction prefix -> it is
+            # never cut.
             messages[0]["content"] = base_system_prompt + self._tasks_block()
             try:
-                msg, usage = call_model(messages, self.model, self.api_key,
-                                        tools=self.tool_schemas)
+                msg, usage = call_model(
+                    messages, self.model, self.provider_cfg,
+                    api_key=self.api_key, tools=self.tool_schemas)
             except RateLimited as e:
                 prog.update(step=step, status="rate_limited", note=str(e))
                 self._write_progress(prog)
@@ -687,12 +601,12 @@ class HermesLoop:
                 self._write_progress(prog)
                 self._fire_on_error(e)       # Gap 1: OnError
                 self._fire_on_stop("error", str(e)[:300])
-                self._finish_accounting()    # Gap 3: usage.json + ringkasan
+                self._finish_accounting()    # Gap 3: usage.json + summary
                 print(f"[hermes] ERROR: {e}", flush=True)
                 return 1
 
-            # Gap 3 — akuntansi tiap selesai call_model; stop rapi bila
-            # run_cost_cap tercapai (status cost_capped, return 0).
+            # Gap 3 — accounting after every call_model; stop cleanly when
+            # run_cost_cap is hit (status cost_capped, return 0).
             if self._accounting_after_call(usage, messages, step):
                 note = self.acct.cap_message()
                 prog.update(step=step, status="cost_capped", note=note)
@@ -711,8 +625,8 @@ class HermesLoop:
             assistant_msg = {"role": "assistant", "content": msg.get("content")}
             if msg.get("tool_calls"):
                 assistant_msg["tool_calls"] = msg["tool_calls"]
-            # Lapis 2/3: pipeline threshold berdasar prompt_tokens respons.
-            # Bila usage tak tersedia, estimasi dari request yang baru dikirim.
+            # Layers 2/3: threshold pipeline based on response prompt_tokens.
+            # When usage is unavailable, estimate from the request just sent.
             prompt_tokens = (usage or {}).get("prompt_tokens")
             if not prompt_tokens:
                 prompt_tokens = estimate_tokens(messages)
@@ -737,7 +651,7 @@ class HermesLoop:
                         args = json.loads(fn.get("arguments") or "{}")
                     except Exception:
                         args = {}
-                    # Gap 1: jalur penuh tool lewat _dispatch_tool
+                    # Gap 1: the full tool path via _dispatch_tool
                     # (PreToolUse -> permission gate -> exec -> PostToolUse).
                     result = self._dispatch_tool(name, args)
                     messages.append(
@@ -775,12 +689,12 @@ class HermesLoop:
                 self._write_progress(prog)
                 continue
 
-            # jawaban akhir — tidak ada tool call
+            # final answer — no tool calls
             prog.update(step=step, status="done")
             self._write_progress(prog)
             self._write_out(content, "done")
             self._fire_on_stop("done")
-            self._finish_accounting()    # Gap 3: usage.json + ringkasan
+            self._finish_accounting()    # Gap 3: usage.json + summary
             print(f"[hermes] selesai di step {step}. OUT.md ditulis.", flush=True)
             return 0
 
@@ -796,17 +710,17 @@ class HermesLoop:
         )
         self._fire_on_stop("max_steps",
                            f"max-steps ({self.max_steps}) tercapai")
-        self._finish_accounting()    # Gap 3: usage.json + ringkasan
+        self._finish_accounting()    # Gap 3: usage.json + summary
         print("[hermes] max-steps tercapai.", flush=True)
         return 0
 
 
 def load_config(path):
-    """Baca profil YAML (butuh PyYAML); kembalikan dict kosong bila gagal."""
+    """Read a YAML profile (needs PyYAML); return {} on failure."""
     try:
         import yaml  # noqa
     except ImportError:
-        sys.stderr.write("peringatan: PyYAML tidak ada — --config diabaikan.\n")
+        sys.stderr.write("warning: PyYAML missing — --config ignored.\n")
         return {}
     with open(path) as f:
         return yaml.safe_load(f) or {}
@@ -814,38 +728,71 @@ def load_config(path):
 
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(
-        description="hermes-agent v1 — ReAct loop (otak: model 9router)."
+        description="hermes-agent — ReAct loop over an OpenAI-compatible provider."
     )
-    ap.add_argument("--task", required=True, help="tugas untuk agent")
-    ap.add_argument("--outdir", required=True, help="direktori output (OUT.md + progress.json)")
-    ap.add_argument(
-        "--model",
-        default=DEFAULT_MODEL,
-        help=f"override model (default: {DEFAULT_MODEL}). bns/* dan oc/* DITOLAK.",
-    )
-    ap.add_argument("--max-steps", type=int, default=40, help="maksimal langkah ReAct (default 40)")
-    ap.add_argument("--config", default=None, help="profil YAML dari configs/ (opsional)")
-    ap.add_argument("--system-prompt", default=None, help="override system prompt (opsional)")
+    ap.add_argument("--task", required=True, help="task for the agent")
+    ap.add_argument("--outdir", required=True,
+                    help="output directory (OUT.md + progress.json)")
+    ap.add_argument("--model", default=None,
+                    help="model override (default: top-level config 'model:' "
+                         "or provider.model)")
+    ap.add_argument("--max-steps", type=int, default=40,
+                    help="max ReAct steps (default 40)")
+    ap.add_argument("--config", default=None,
+                    help="YAML profile from configs/ (optional)")
+    ap.add_argument("--system-prompt", default=None,
+                    help="system prompt override (optional)")
+    ap.add_argument("--workspace", default=None,
+                    help="sandbox workspace root "
+                         "(overrides config workspace_root)")
+    ap.add_argument("--lang", default=None, choices=["en", "id"],
+                    help="default prompt language: en|id "
+                         "(overrides config language)")
     ap.add_argument(
         "--tidy",
         action="store_true",
-        help="rapikan MEMORY.md di --outdir via autoDream lalu keluar "
-             "(tanpa menjalankan task).",
+        help="tidy MEMORY.md in --outdir via autoDream, then exit "
+             "(no task is run).",
     )
     ap.add_argument(
         "--no-exec",
         action="store_true",
-        help="mode baca-saja: tool `exec` dibuang dari toolset run ini "
-             "(dipakai worker orchestrator).",
+        help="read-only mode: drop the `exec` tool from this run's toolset "
+             "(used by orchestrator workers).",
     )
     args = ap.parse_args(argv)
 
     cfg = load_config(args.config) if args.config else {}
     memory_cfg = cfg.get("memory") or {}
 
-    # Fase 4 — orchestrator (OPSIONAL, "by choose", keputusan Bayu 2026-10-09):
-    # aktif hanya bila enabled + orchestrator_model terisi. Model kosong /
-    # enabled=false -> 100% single-agent seperti sebelumnya.
+    # Provider: endpoint + key source + default model (hermes/providers.py).
+    # All environment specifics live in config — nothing hardcoded here.
+    provider_cfg = ProviderConfig.from_dict(cfg.get("provider") or {})
+    model_policy = cfg.get("model_policy") or {}
+
+    # Sandbox roots: the configured workspace (+ /tmp, always allowed).
+    workspace_root = os.path.abspath(
+        args.workspace or cfg.get("workspace_root") or "./workspace")
+    tools.configure_roots(workspace_root)
+
+    # Default prompt language (config 'system_prompt' still overrides).
+    lang = (args.lang or cfg.get("language") or "en").strip().lower()
+    if lang not in ("en", "id"):
+        sys.stderr.write(
+            f"warning: unknown language {lang!r} — falling back to 'en'.\n")
+        lang = "en"
+
+    # Effective model: CLI flag > top-level config 'model:' > provider.model.
+    model = (args.model or cfg.get("model") or provider_cfg.model or "").strip()
+
+    # Default system prompt for the language; explicit config/CLI wins.
+    default_prompt = get_system_prompt(lang, workspace_root=workspace_root)
+    system_prompt = (args.system_prompt or cfg.get("system_prompt")
+                     or default_prompt)
+
+    # Phase 4 — orchestrator (OPTIONAL & PLUGGABLE): active only when
+    # enabled AND orchestrator_model is set. Empty model / enabled=false
+    # -> 100% single-agent, as before.
     orch_cfg = cfg.get("orchestrator") or {}
     orch_wanted = bool(orch_cfg.get("enabled", True)) and bool(
         (orch_cfg.get("orchestrator_model") or "").strip()
@@ -853,19 +800,21 @@ def main(argv=None) -> int:
     if orch_wanted:
         if os.environ.get("_HERMES_WORKER") == "1":
             sys.stderr.write(
-                "ERROR: depth guard — worker dilarang menjalankan "
-                "orchestrator.\n"
+                "ERROR: depth guard — workers may not run the orchestrator.\n"
             )
             return 2
-        # Lazy import agar tidak circular (orchestrator tidak import loop).
+        # Lazy import to avoid a cycle (orchestrator never imports loop).
         from .orchestrator import Orchestrator, OrchestratorError
         try:
             orch = Orchestrator.from_config(
                 orch_cfg,
                 task=args.task,
                 outdir=args.outdir,
-                model=cfg.get("model", args.model),
-                api_key=get_api_key(),
+                model=model,
+                provider_cfg=provider_cfg,
+                model_policy=model_policy,
+                workspace_root=workspace_root,
+                language=lang,
                 compaction_cfg=cfg.get("compaction"),
                 memory_cfg=memory_cfg or None,
                 permissions_cfg=cfg.get("permissions"),
@@ -875,11 +824,11 @@ def main(argv=None) -> int:
             orch.run(args.task, args.outdir)
             return 0
         except OrchestratorError as e:
-            # Mandor mati / plan gagal / depth guard: fallback single-agent,
-            # run tidak boleh crash karenanya.
+            # Dead planner / failed plan / depth guard: fall back to
+            # single-agent; the run must not crash because of this.
             print(
-                f"[hermes] orchestrator gagal ({e}) — "
-                f"fallback ke single-agent.",
+                f"[hermes] orchestrator failed ({e}) — "
+                f"falling back to single-agent.",
                 flush=True,
             )
 
@@ -890,31 +839,44 @@ def main(argv=None) -> int:
             max_fact_chars=int(memory_cfg.get("max_fact_chars",
                                               DEFAULT_MAX_FACT_CHARS)),
         )
-        model = str(memory_cfg.get("summarizer_model",
-                                   MEMORY_SUMMARIZER_MODEL))
-        _validate_compaction_model(model)  # ag/* saja; bns/*/oc/* -> exit 2
+        tidy_model = str(memory_cfg.get("summarizer_model",
+                                        MEMORY_SUMMARIZER_MODEL))
         try:
-            new_text = mem.tidy(get_api_key(), model=model)
+            check_model_allowed(tidy_model, model_policy)
+        except ValueError as e:
+            sys.stderr.write(f"ERROR: {e}\n")
+            return 2
+        try:
+            new_text = mem.tidy(get_api_key(provider_cfg), model=tidy_model,
+                                model_policy=model_policy,
+                                provider_cfg=provider_cfg)
         except Exception as e:
-            sys.stderr.write(f"ERROR: tidy gagal: {e}\n")
+            sys.stderr.write(f"ERROR: tidy failed: {e}\n")
             return 1
-        print("MEMORY.md setelah tidy:\n" + (new_text or "(kosong)"))
+        print("MEMORY.md after tidy:\n" + (new_text or "(empty)"))
         return 0
 
-    loop = HermesLoop(
-        task=args.task,
-        outdir=args.outdir,
-        model=cfg.get("model", args.model),
-        max_steps=int(cfg.get("max_steps", args.max_steps)),
-        system_prompt=args.system_prompt or cfg.get("system_prompt", SYSTEM_PROMPT),
-        compaction_cfg=cfg.get("compaction"),
-        memory_cfg=memory_cfg or None,
-        permissions_cfg=cfg.get("permissions"),
-        no_exec=args.no_exec,
-        hooks_cfg=cfg.get("hooks"),  # Gap 1: blok `hooks:` di YAML
-        tasks_cfg=cfg.get("tasks"),  # Gap 2: blok `tasks:` di YAML
-        accounting_cfg=cfg.get("accounting"),  # Gap 3: blok `accounting:`
-    )
+    try:
+        loop = HermesLoop(
+            task=args.task,
+            outdir=args.outdir,
+            model=model,
+            max_steps=int(cfg.get("max_steps", args.max_steps)),
+            system_prompt=system_prompt,
+            compaction_cfg=cfg.get("compaction"),
+            memory_cfg=memory_cfg or None,
+            permissions_cfg=cfg.get("permissions"),
+            no_exec=args.no_exec,
+            hooks_cfg=cfg.get("hooks"),  # Gap 1: `hooks:` block in YAML
+            tasks_cfg=cfg.get("tasks"),  # Gap 2: `tasks:` block in YAML
+            accounting_cfg=cfg.get("accounting"),  # Gap 3: `accounting:` block
+            provider_cfg=provider_cfg,
+            model_policy=model_policy,
+        )
+    except ValueError as e:
+        # Config/CLI model or summarizer model violates the model policy.
+        sys.stderr.write(f"ERROR: {e}\n")
+        return 2
     return loop.run()
 
 

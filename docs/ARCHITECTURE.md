@@ -107,8 +107,8 @@ kosong / `enabled: false` → 100% single-agent (tidak ada perubahan
 perilaku default). Model mandor bisa diganti + API custom via
 `orchestrator_api_base` / `orchestrator_api_key_env` (key HANYA via env
 var). Mandor mati → `OrchestratorError` → `loop.main` fallback ke
-single-agent + warning; run tidak crash. Via 9router HANYA `ag/*`
-(`bns/*`/`oc/*` ditolak di kode).
+single-agent + warning; run tidak crash. Model mandor tunduk pada
+`model_policy` (allow/forbid) yang sama seperti loop utama.
 
 ---
 

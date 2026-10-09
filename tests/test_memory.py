@@ -135,13 +135,16 @@ class TestTidy(unittest.TestCase):
         self.assertIn("Catatan audit plugin A", out)
 
     def test_tidy_rejects_forbidden_model(self):
+        # Policy equivalent of the old hardcoded rule, now explicit.
+        policy = {"allow": ["ag/*"], "forbid": ["bns/*", "oc/*"]}
         mem, _ = fresh_mem()
         mem.remember("satu")
         mem.remember("dua")
         with self.assertRaises(ValueError):
-            mem.tidy("k", model="bns/deepseek-v4.1-flash")
+            mem.tidy("k", model="bns/deepseek-v4.1-flash",
+                     model_policy=policy)
         with self.assertRaises(ValueError):
-            mem.tidy("k", model="oc/muse-spark-1.3")
+            mem.tidy("k", model="oc/muse-spark-1.3", model_policy=policy)
 
     def test_tidy_noop_when_few_bullets(self):
         mem, _ = fresh_mem()
@@ -186,7 +189,8 @@ class TestLoopIntegration(unittest.TestCase):
                "summarizer_model": "ag/gemini-3-flash"}
         cfg.update(kw)
         with mock.patch.object(LOOP, "get_api_key", return_value="test-key"):
-            return LOOP.HermesLoop(task="t", outdir=outdir, memory_cfg=cfg)
+            return LOOP.HermesLoop(task="t", outdir=outdir,
+                                   model="ag/gemini-3-flash", memory_cfg=cfg)
 
     def test_recall_injected_into_system_prompt(self):
         d = tempfile.mkdtemp()
@@ -196,7 +200,8 @@ class TestLoopIntegration(unittest.TestCase):
 
         captured = {}
 
-        def fake_call(messages, model, api_key, tools=None):
+        def fake_call(messages, model, provider_cfg, api_key=None,
+                      tools=None):
             captured["system"] = messages[0]["content"]
             return ({"content": "TIDAK ADA TEMUAN", "tool_calls": None},
                     {"prompt_tokens": 50})
@@ -214,7 +219,8 @@ class TestLoopIntegration(unittest.TestCase):
         loop = self._make_loop(d)
         captured = {}
 
-        def fake_call(messages, model, api_key, tools=None):
+        def fake_call(messages, model, provider_cfg, api_key=None,
+                      tools=None):
             captured["system"] = messages[0]["content"]
             return ({"content": "TIDAK ADA TEMUAN", "tool_calls": None}, {})
 
@@ -256,11 +262,13 @@ class TestLoopIntegration(unittest.TestCase):
 
     def test_forbidden_summarizer_rejected_in_loop(self):
         d = tempfile.mkdtemp()
+        policy = {"allow": ["ag/*"], "forbid": ["bns/*", "oc/*"]}
         with mock.patch.object(LOOP, "get_api_key", return_value="k"):
-            with self.assertRaises(SystemExit):
+            with self.assertRaises(ValueError):
                 LOOP.HermesLoop(
-                    task="t", outdir=d,
-                    memory_cfg={"summarizer_model": "bns/x"})
+                    task="t", outdir=d, model="ag/gemini-3-flash",
+                    memory_cfg={"summarizer_model": "bns/x"},
+                    model_policy=policy)
 
 
 if __name__ == "__main__":

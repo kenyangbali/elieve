@@ -38,7 +38,7 @@ READ_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "read_file",
-            "description": "Baca file teks. Path WAJIB absolut dan di bawah /home/hatch/workspace atau /tmp.",
+            "description": "Read a text file. Path MUST be absolute and under the configured workspace root or /tmp.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -54,7 +54,7 @@ READ_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "list_dir",
-            "description": "List isi direktori. Path WAJIB absolut dan di bawah /home/hatch/workspace atau /tmp.",
+            "description": "List directory contents. Path MUST be absolute and under the configured workspace root or /tmp.",
             "parameters": {
                 "type": "object",
                 "properties": {"path": {"type": "string"}},
