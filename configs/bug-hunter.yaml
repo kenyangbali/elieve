@@ -1,8 +1,8 @@
 # Profil bug-hunter — dipakai via: python3 -m elieve.loop --config configs/bug-hunter.yaml --task "..." --outdir ...
 # Nilai di sini menjadi default; flag CLI (--model, --max-steps) menimpa bila diisi.
 
-model: ag/claude-opus-4-6-thinking   # audit berat (default)
-# Alternatif: ag/gemini-3.1-pro (kuat), ag/gemini-3-flash (ringan/cepat)
+model: cx/gpt-5.6-terra   # best available (ag/* rate-limited 2026-10-09)
+# Alternatif saat ag/* pulih: ag/claude-opus-4-6-thinking, ag/gemini-3.1-pro, ag/gemini-3-flash
 # DILARANG: bns/* dan oc/* (kuota terlarang — ditolak di kode)
 
 max_steps: 40
@@ -15,14 +15,21 @@ provider:
   base_url: http://127.0.0.1:20128/v1
   key_provider: "9router"   # read ~/.9router/db/data.sqlite (table apiKeys, name='Default Key')
   api_key_env: ""           # used only when key_provider is empty: NAME of env var holding the key
-  model: ag/claude-opus-4-6-thinking   # canonical; top-level `model:` above still overrides
+  model: cx/gpt-5.6-terra   # canonical; top-level `model:` above still overrides
   timeout_s: 180
 
 # Model policy: allow/forbid lists, trailing `*` = prefix wildcard.
 # Empty/missing = unrestricted. forbid wins over allow.
 # Replaces the old hardcoded ag/*-vs-bns/*/oc/* checks in code.
 model_policy:
-  allow: ["ag/*"]
+  # ATURAN BAYU 2026-10-09 18:56 (revisi 19:16 — jangan mengekang):
+  # Baseline agent & orchestrator: cx/gpt-5.6-terra / ag/claude-opus-4-6-thinking.
+  # - BOLEH dan WAJIB pakai model yang LEBIH BAIK jika muncul (generasi lebih baru,
+  #   benchmark lebih tinggi, atau tier akun naik). Jangan terkunci di model lama.
+  # - Kedua baseline mati & tak ada pengganti lebih baik -> STOP pakai elieve agent.
+  # - Satu mati -> yang hidup (atau yang lebih baik) tambal kedua peran.
+  # Classifier terpisah: gemini-3.1-flash-lite via API langsung (tidak kena policy ini).
+  allow: ["cx/*", "ag/*"]
   forbid: ["bns/*", "oc/*"]
 
 # Tool sandbox: the agent's working root (absolute). /tmp is always allowed too.
@@ -78,9 +85,9 @@ memory:
 # API key custom HANYA via env var (classifier_api_key_env = NAMA env var).
 permissions:
   enabled: true
-  classifier_model: ""        # mis. ag/gemini-3-flash ; kosong = OFF
-  classifier_api_base: ""     # kosong = 9router lokal; isi URL OpenAI-compatible custom
-  classifier_api_key_env: ""  # NAMA env var berisi key custom (tak pernah di-hardcode)
+  classifier_model: "gemini-3.1-flash-lite"  # ON 2026-10-09: model kecil/hemat via Gemini API langsung (11 key Bayu)
+  classifier_api_base: "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"  # OpenAI-compatible; bypass 9router ag/* yg rate-limit
+  classifier_api_key_env: "ELIEVE_CLASSIFIER_KEY"  # diisi dari ~/.elieve/gemini_classifier_keys (mode 600) via ~/.bashrc; key #1 aktif, 10 cadangan
   kilat_max_tokens: 32        # verdict kilat <64 token
   kilat_timeout_s: 10         # timeout singkat tahap 1
   max_consecutive_failures: 3 # auto-disable classifier setelah N gagal beruntun
@@ -154,7 +161,7 @@ mcp:
 # API key custom HANYA via env var (orchestrator_api_key_env = NAMA env var).
 orchestrator:
   enabled: true
-  orchestrator_model: ""       # mis. ag/gemini-3-flash ; kosong = OFF (single-agent)
+  orchestrator_model: "cx/gpt-5.6-terra"  # ON 2026-10-09: model terbaik jadi mandor
   orchestrator_api_base: ""    # kosong = 9router lokal; isi URL OpenAI-compatible custom
   orchestrator_api_key_env: "" # NAMA env var berisi key custom (tak pernah di-hardcode)
   worker_model: ""             # kosong = pakai model utama

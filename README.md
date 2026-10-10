@@ -40,7 +40,7 @@ completions API**.
 ### Install
 
 ```bash
-git clone https://github.com/kenyangbali/elieve.git
+git clone https://github.com/elieve-dev/elieve.git
 cd elieve
 pip install -e .
 ```
@@ -48,7 +48,7 @@ pip install -e .
 Or install directly from git:
 
 ```bash
-pip install git+https://github.com/kenyangbali/elieve.git
+pip install git+https://github.com/elieve-dev/elieve.git
 ```
 
 ### Configure the API key

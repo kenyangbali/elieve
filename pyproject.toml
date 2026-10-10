@@ -9,7 +9,7 @@ description = "Modular AI agent framework — ReAct loop with sandboxed tools, c
 readme = "README.md"
 requires-python = ">=3.9"
 license = { text = "MIT" }
-authors = [{ name = "kenyangbali" }]
+authors = [{ name = "elieve-dev" }]
 keywords = ["ai", "agent", "react", "llm", "openai-compatible"]
 classifiers = [
     "Programming Language :: Python :: 3",
