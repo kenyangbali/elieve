@@ -35,12 +35,8 @@ model_policy:
 # Tool sandbox: the agent's working root (absolute). /tmp is always allowed too.
 workspace_root: /home/hatch/workspace
 
-# Default system-prompt language: en | id ('system_prompt' below still overrides).
+# Plan-mode instruction language: en | id (used only by --plan).
 language: id
-
-# Prompt persona profile: default (generic agent) | hunter (bug-hunter).
-# The hunter profile restores the strict evidence-first persona.
-profile: hunter
 
 # Tool yang boleh dipakai profil ini (subset dari elieve/tools).
 tools:
@@ -56,7 +52,8 @@ sandbox:
     - /tmp
   exec_cwd: /home/hatch/workspace
 
-# System prompt profil ini. Kosongkan (= null) untuk memakai default bawaan loop.py.
+# System prompt untuk run ini. Kosongkan (= null) = tanpa system prompt
+# sama sekali — elieve tidak punya bawaan (kosong by design).
 system_prompt: null
 
 # Rate limit sopan antar panggilan model (detik).
@@ -71,7 +68,7 @@ compaction:
   thresholds: [70, 80, 85, 90, 95]  # persen dari context_limit
   summarizer_model: ag/gemini-3-flash  # murah; bns/*/oc/* DITOLAK di kode
   full_compact_keep_recent: 5 # turn terakhir verbatim setelah full compact
-  prefix_len: 2               # system + task awal: TIDAK PERNAH diubah
+  prefix_len: 2               # 2 pesan pertama (system bila ada + task awal): TIDAK PERNAH diubah
 
 # Fase 2 — MEMORY.md + autoDream (docs/ARCHITECTURE.md §2).
 memory:

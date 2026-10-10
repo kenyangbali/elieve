@@ -72,7 +72,6 @@ from .providers import (
     post_chat_completions,
     resolve_api_key,
 )
-from .prompts import get_system_prompt
 
 MODEL_CALL_DELAY_S = 3
 
@@ -181,8 +180,11 @@ class ElieveLoop:
         # Policy-based validation (replaces the old hardcoded allow/forbid).
         self.model = check_model_allowed(raw_model, self.model_policy)
         self.max_steps = max_steps
+        # elieve ships with NO built-in system prompt: empty unless the
+        # operator supplies one via config/CLI. Empty => the loop sends
+        # no system message at all.
         self.system_prompt = (system_prompt if system_prompt is not None
-                              else get_system_prompt("en"))
+                              else "")
         self.api_key = get_api_key(self.provider_cfg)
         # Gap 1 — hook lifecycle (deterministic, the model cannot skip it).
         # hooks_cfg None/empty -> every event is a no-op.
@@ -645,21 +647,32 @@ class ElieveLoop:
             )
         # Gap 2: static system-prompt base; the task block is re-injected
         # fresh each turn (see _tasks_block) so it survives compaction.
+        # elieve ships with no built-in prompt: when the effective system
+        # content is empty, NO system message is sent at all (some
+        # providers reject empty system messages; the task block below
+        # creates one on demand only if tasks exist).
         base_system_prompt = system_prompt
-        messages = [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": self.task},
-        ]
+        messages = []
+        has_system = bool(base_system_prompt)
+        if has_system:
+            messages.append({"role": "system", "content": base_system_prompt})
+        messages.append({"role": "user", "content": self.task})
         start_step = 0
         if self._resume_record is not None:
             # Gap 4 (--resume): LANJUT dari snapshot — step + messages +
             # state. Bukan mulai dari nol. Blok task lama di-strip agar
-            # injeksi fresh tiap turn tidak menumpuk.
+            # injeksi fresh tiap turn tidak menumpuk. Runs that started
+            # with no system message have none here either (messages[0]
+            # is the user task then) — detect by role, don't assume.
             rec = self._resume_record
             start_step = int(rec.get("step") or 0)
-            base_system_prompt = _strip_tasks_block(
-                (rec.get("messages") or [{}])[0].get("content") or "")
             messages = [dict(m) for m in (rec.get("messages") or [])]
+            has_system = bool(messages) and messages[0].get("role") == "system"
+            if has_system:
+                base_system_prompt = _strip_tasks_block(
+                    messages[0].get("content") or "")
+            else:
+                base_system_prompt = ""
             print(
                 f"[elieve] resume dari checkpoint step {start_step} "
                 f"({len(messages)} messages).",
@@ -692,8 +705,15 @@ class ElieveLoop:
             messages = self._maybe_micro_compact(messages)
             # Gap 2: inject a fresh task summary into the system prompt each
             # turn. The system prompt sits in the compaction prefix -> it is
-            # never cut.
-            messages[0]["content"] = base_system_prompt + self._tasks_block()
+            # never cut. When the run has no system message yet but a task
+            # block exists, create the system message on demand.
+            _block = self._tasks_block()
+            if has_system:
+                messages[0]["content"] = base_system_prompt + _block
+            elif _block:
+                messages.insert(0, {"role": "system",
+                                    "content": base_system_prompt + _block})
+                has_system = True
             try:
                 msg, usage = call_model(
                     messages, self.model, self.provider_cfg,
@@ -834,7 +854,7 @@ class ElieveLoop:
 
 
 def load_config(path):
-    """Read a YAML profile (needs PyYAML); return {} on failure."""
+    """Read a YAML config file (needs PyYAML); return {} on failure."""
     try:
         import yaml  # noqa
     except ImportError:
@@ -860,18 +880,16 @@ def main(argv=None) -> int:
     ap.add_argument("--max-steps", type=int, default=40,
                     help="max ReAct steps (default 40)")
     ap.add_argument("--config", default=None,
-                    help="YAML profile from configs/ (optional)")
+                    help="YAML config file from configs/ (optional)")
     ap.add_argument("--system-prompt", default=None,
                     help="system prompt override (optional)")
     ap.add_argument("--workspace", default=None,
                     help="sandbox workspace root "
                          "(overrides config workspace_root)")
     ap.add_argument("--lang", default=None, choices=["en", "id"],
-                    help="default prompt language: en|id "
-                         "(overrides config language)")
-    ap.add_argument("--profile", default=None, choices=["default", "hunter"],
-                    help="prompt persona profile: default (generic) | hunter "
-                         "(bug-hunter; overrides config profile)")
+                    help="plan-mode instruction language: en|id "
+                         "(overrides config language; inert otherwise — "
+                         "elieve ships no default prompt)")
     ap.add_argument(
         "--tidy",
         action="store_true",
@@ -960,7 +978,8 @@ def main(argv=None) -> int:
         args.workspace or cfg.get("workspace_root") or "./workspace")
     tools.configure_roots(workspace_root)
 
-    # Default prompt language (config 'system_prompt' still overrides).
+    # Plan-mode instruction language (config 'system_prompt' is
+    # independent; elieve ships no built-in prompt in any language).
     lang = (args.lang or cfg.get("language") or "en").strip().lower()
     if lang not in ("en", "id"):
         sys.stderr.write(
@@ -970,19 +989,10 @@ def main(argv=None) -> int:
     # Effective model: CLI flag > top-level config 'model:' > provider.model.
     model = (args.model or cfg.get("model") or provider_cfg.model or "").strip()
 
-    # Prompt persona profile: 'default' (generic) or 'hunter' (bug-hunter).
-    # Explicit config/CLI system_prompt still wins over everything.
-    profile = (args.profile or cfg.get("profile") or "default").strip().lower()
-    if profile not in ("default", "hunter"):
-        sys.stderr.write(
-            f"warning: unknown profile {profile!r} — falling back to 'default'.\n")
-        profile = "default"
-
-    # Default system prompt for the language+profile; explicit config/CLI wins.
-    default_prompt = get_system_prompt(lang, workspace_root=workspace_root,
-                                       profile=profile)
-    system_prompt = (args.system_prompt or cfg.get("system_prompt")
-                     or default_prompt)
+    # No built-in system prompt: empty unless the operator supplies one
+    # via CLI --system-prompt or config 'system_prompt:'. The loop sends
+    # no system message at all when this is empty.
+    system_prompt = (args.system_prompt or cfg.get("system_prompt") or "")
 
     # Phase 4 — orchestrator (OPTIONAL & PLUGGABLE): active only when
     # enabled AND orchestrator_model is set. Empty model / enabled=false
@@ -1009,7 +1019,6 @@ def main(argv=None) -> int:
                           or cfg.get("max_steps", args.max_steps)),
             lang=lang,
             workspace_root=workspace_root,
-            profile=profile,
             system_prompt=args.system_prompt or cfg.get("system_prompt"),
             compaction_cfg=cfg.get("compaction"),
             memory_cfg=memory_cfg or None,

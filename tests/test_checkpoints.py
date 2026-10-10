@@ -226,7 +226,9 @@ class TestResumeLoop(unittest.TestCase):
             rc2 = loop2.run()
         self.assertEqual(rc2, 0)
         # pesan lengkap dari checkpoint diteruskan ke model (bukan dari nol)
-        self.assertEqual(seen["n_messages"], 6)  # sys+user+asst+tool+asst+tool
+        # elieve ships no built-in prompt: no system message when the
+        # operator supplies none -> user+asst+tool+asst+tool
+        self.assertEqual(seen["n_messages"], 5)
         self.assertEqual(seen["last_role"], "tool")
         # step berlanjut N+1
         with open(os.path.join(d, "progress.json"), encoding="utf-8") as f:

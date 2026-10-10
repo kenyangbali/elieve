@@ -35,6 +35,35 @@ completions API**.
   totals (`usage.json`), context-window warnings, and configurable
   run cost caps.
 
+## Positioning: blank by design (Hermes, Anthropic-style)
+
+elieve ships with **no built-in system prompt, no persona, no soul.md,
+no hard rules, and no modes**. The framework is intentionally blank —
+you bring your own prompt, or run with none at all. The operator (you,
+self-hosting) is the highest authority; the framework never refuses
+your instructions.
+
+Set your prompt explicitly:
+
+```yaml
+# configs/my.yaml
+system_prompt: |
+  You are a careful code reviewer. ...
+```
+
+or via CLI:
+
+```bash
+python3 -m elieve.loop --task "..." --outdir out \
+    --system-prompt "You are a careful code reviewer. ..."
+```
+
+Omit both and the loop sends **no system message at all** — the model
+works from your task text directly. (Operational notices the harness
+itself needs — e.g. read-only mode, the plan-mode format, the per-turn
+task summary — are still appended when those features are active; they
+describe how the harness works, not who the agent is.)
+
 ## Quickstart
 
 ### Install
@@ -127,14 +156,14 @@ Runs the full unit suite (no network/API key needed).
 ```
 elieve --task TASK --outdir OUTDIR [--model MODEL] [--max-steps MAX_STEPS]
        [--config CONFIG] [--system-prompt SYSTEM_PROMPT] [--workspace WORKSPACE]
-       [--lang {en,id}] [--profile {default,hunter}] [--tidy] [--no-exec]
+       [--lang {en,id}] [--tidy] [--no-exec]
 ```
 
 - `--model` overrides the config's model; `--max-steps` caps ReAct
   steps (default 40).
-- `--lang` selects the default system prompt (`en` | `id`).
-- `--profile` selects the prompt persona: `default` (generic agent) or
-  `hunter` (strict bug-hunter persona, opt-in).
+- `--system-prompt` sets your system prompt. elieve ships **none** —
+  without it, the loop sends no system message at all.
+- `--lang` selects the plan-mode instruction language (`en` | `id`).
 - `--tidy` runs `autoDream` cleanup on the outdir's `MEMORY.md` and
   exits (no task is run).
 - `--no-exec` drops the `exec` tool for a read-only run (used by
@@ -158,8 +187,8 @@ Other top-level keys:
 |-----|---------|
 | `model_policy` | `allow:` / `forbid:` model prefix lists (trailing `*` wildcards; `forbid` wins). Empty = unrestricted. |
 | `workspace_root` | Sandbox root for tools (relative = resolved from cwd; `/tmp` always allowed) |
-| `language` | Default system-prompt language: `en` or `id` (CLI `--lang` overrides) |
-| `profile` | Prompt persona: `default` (generic agent) or `hunter` (bug-hunter, opt-in). CLI `--profile` overrides. Explicit `system_prompt` still wins over both. |
+| `language` | Plan-mode instruction language: `en` or `id` (CLI `--lang` overrides) |
+| `system_prompt` | **Your** system prompt (string). `null`/empty = no system message is sent at all — elieve ships no built-in prompt |
 
 Note: `configs/bug-hunter.yaml` is a personal, Indonesian-language
 example profile (built around a local gateway setup), **not** the

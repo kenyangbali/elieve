@@ -32,10 +32,10 @@ max_steps: 40
 # resolved from the process cwd). /tmp is always allowed as a second root.
 workspace_root: ./workspace
 
-# Default system-prompt language: en | id.
+# Plan-mode instruction language: en | id (used only by --plan).
 language: en
 
-# Custom system prompt (null = built-in default for `language`).
+# Your system prompt (null = none at all — elieve ships no built-in prompt).
 system_prompt: null
 
 # --- Local Ollama example -----------------------------------------------

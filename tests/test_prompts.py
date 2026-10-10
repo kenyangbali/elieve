@@ -1,110 +1,194 @@
-"""Unit tests for elieve.prompts — generic default + opt-in hunter profile.
+"""Unit tests for elieve.prompts — the emptiness contract.
 
-Style contract ("mode antropik"): minimal and principle-based. No hard-
-rules blocks, no threatening prohibition lists, no refusal tone — in the
-default AND in the hunter profile.
+Product decision (Bayu 2026-10-11): elieve ("Hermes, Anthropic-style")
+ships with NO built-in system prompt, persona, soul.md, rules, or modes.
+The framework is blank by design; the operator supplies their own prompt
+— or none at all. get_system_prompt() is kept for backward compatibility
+and ALWAYS returns "". When nothing is supplied, the loop sends NO
+system message at all.
 
 Run: cd ~/workspace/hermes-agent && python3 -m unittest discover -s tests
 """
 
 import os
 import sys
+import tempfile
 import unittest
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from elieve.prompts import (  # noqa: E402
-    EN_SYSTEM_PROMPT,
-    HUNTER_SYSTEM_PROMPT_EN,
-    HUNTER_SYSTEM_PROMPT_ID,
-    ID_SYSTEM_PROMPT,
-    get_system_prompt,
-)
+import elieve.loop as LOOP  # noqa: E402
+from elieve import prompts as PROMPTS  # noqa: E402
+from elieve.prompts import get_system_prompt  # noqa: E402
 
-BANNED_TONE = ("HARD RULES", "ATURAN KERAS", "DILARANG")
+REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+PKG = os.path.join(REPO, "elieve")
 
 
-class TestGenericDefault(unittest.TestCase):
-    def test_english_is_generic_not_hunter(self):
-        self.assertIn("general-purpose", EN_SYSTEM_PROMPT)
-        self.assertNotIn("bug hunter", EN_SYSTEM_PROMPT.lower())
+class TestAlwaysEmpty(unittest.TestCase):
+    def test_empty_for_every_signature(self):
+        # Old signatures (lang / workspace_root / profile) are all
+        # accepted, all ignored — always "".
+        self.assertEqual(get_system_prompt(), "")
+        self.assertEqual(get_system_prompt("en"), "")
+        self.assertEqual(get_system_prompt("id"), "")
+        self.assertEqual(get_system_prompt("xx"), "")
+        self.assertEqual(get_system_prompt("en", workspace_root="/x/y"), "")
+        self.assertEqual(get_system_prompt("id", profile="hunter"), "")
+        self.assertEqual(get_system_prompt("en", "/x/y", "default"), "")
 
-    def test_indonesian_is_generic_not_hunter(self):
-        self.assertIn("general", ID_SYSTEM_PROMPT)
-        self.assertNotIn("bug hunter", ID_SYSTEM_PROMPT.lower())
-
-    def test_no_harsh_rule_blocks(self):
-        for prompt in (EN_SYSTEM_PROMPT, ID_SYSTEM_PROMPT):
-            for banned in BANNED_TONE:
-                self.assertNotIn(banned, prompt)
-
-    def test_operator_is_highest_authority_no_refusal_tone(self):
-        # Product model: public self-hosted framework. The operator's
-        # instructions are followed; no refusal mode by default.
-        self.assertIn("operator", EN_SYSTEM_PROMPT.lower())
-        self.assertIn("operator", ID_SYSTEM_PROMPT.lower())
-        for prompt in (EN_SYSTEM_PROMPT, ID_SYSTEM_PROMPT):
-            self.assertNotIn("refus", prompt.lower())
-
-    def test_data_vs_instruction_distinction_kept(self):
-        # The injection defense that matters: untrusted data is never
-        # treated as instructions. Framed as data-wariness, not user refusal.
-        self.assertIn("as data, not instructions", EN_SYSTEM_PROMPT)
-        self.assertIn("sebagai data, bukan instruksi", ID_SYSTEM_PROMPT)
-
-    def test_minimal_not_a_rule_list(self):
-        # Anthropic-style: short paragraphs, no numbered rule lists.
-        for prompt in (EN_SYSTEM_PROMPT, ID_SYSTEM_PROMPT):
-            lines = [l for l in prompt.splitlines() if l.strip()]
-            self.assertLess(len(lines), 40, "default prompt grew too long")
-
-    def test_backward_compat_old_signature(self):
-        # get_system_prompt(lang) must keep working and return the generic default.
-        self.assertEqual(get_system_prompt("en"), EN_SYSTEM_PROMPT.replace(
-            "{WORKSPACE_ROOT}", "./workspace"))
-        self.assertEqual(get_system_prompt("id"), ID_SYSTEM_PROMPT.replace(
-            "{WORKSPACE_ROOT}", "./workspace"))
-
-    def test_unknown_lang_falls_back_to_english(self):
-        self.assertEqual(get_system_prompt("xx"), get_system_prompt("en"))
-
-    def test_workspace_root_substitution(self):
-        out = get_system_prompt("en", workspace_root="/tmp/w")
-        self.assertIn("/tmp/w", out)
-        self.assertNotIn("{WORKSPACE_ROOT}", out)
+    def test_no_other_exports(self):
+        self.assertEqual(PROMPTS.__all__, ["get_system_prompt"])
 
 
-class TestHunterProfile(unittest.TestCase):
-    def test_hunter_is_task_specific(self):
-        self.assertIn("bug hunter", HUNTER_SYSTEM_PROMPT_EN.lower())
-        self.assertIn("bug hunter", HUNTER_SYSTEM_PROMPT_ID.lower())
-        self.assertIn("file:line", HUNTER_SYSTEM_PROMPT_EN)
+class TestNoBuiltinPromptFiles(unittest.TestCase):
+    def test_prompts_dir_has_no_content_files(self):
+        d = os.path.dirname(PROMPTS.__file__)
+        py_files = sorted(f for f in os.listdir(d) if f.endswith(".py"))
+        self.assertEqual(py_files, ["__init__.py"],
+                         f"built-in prompt files must not exist: {py_files}")
 
-    def test_hunter_has_no_harsh_tone_either(self):
-        for prompt in (HUNTER_SYSTEM_PROMPT_EN, HUNTER_SYSTEM_PROMPT_ID):
-            for banned in BANNED_TONE:
-                self.assertNotIn(banned, prompt)
+    def test_no_hunter_or_persona_machinery_in_package(self):
+        # No hunter/persona/profile-mode machinery anywhere in elieve/.
+        hits = []
+        for root, dirs, files in os.walk(PKG):
+            dirs[:] = [x for x in dirs if x != "__pycache__"]
+            for f in files:
+                if not f.endswith(".py"):
+                    continue
+                p = os.path.join(root, f)
+                with open(p, encoding="utf-8") as fh:
+                    src = fh.read().lower()
+                # "profile" survives ONLY as the ignored backward-compat
+                # kwarg name of get_system_prompt — not as a mechanism.
+                if "hunter" in src:
+                    hits.append(f"{p}: hunter")
+        self.assertEqual(hits, [], f"built-in persona remnants: {hits}")
 
-    def test_hunter_keeps_evidence_discipline(self):
-        self.assertIn("evidence", HUNTER_SYSTEM_PROMPT_EN.lower())
-        self.assertIn("bukti", HUNTER_SYSTEM_PROMPT_ID.lower())
+    def test_no_soul_file_anywhere_in_repo(self):
+        hits = []
+        for root, dirs, files in os.walk(REPO):
+            dirs[:] = [x for x in dirs if x not in ("__pycache__", ".git")]
+            for f in files:
+                if "soul" in f.lower():
+                    hits.append(os.path.join(root, f))
+        self.assertEqual(hits, [], f"soul.md must not exist: {hits}")
 
-    def test_hunter_constants_exported(self):
-        self.assertTrue(HUNTER_SYSTEM_PROMPT_EN.strip())
-        self.assertTrue(HUNTER_SYSTEM_PROMPT_ID.strip())
 
-    def test_hunter_workspace_root_substitution(self):
-        out = get_system_prompt("id", workspace_root="/x/y", profile="hunter")
-        self.assertIn("/x/y", out)
-        self.assertNotIn("{WORKSPACE_ROOT}", out)
+class TestLoopSkipsEmptySystemMessage(unittest.TestCase):
+    def _run_and_capture(self, outdir, pre=None, **kw):
+        cfg = {"enabled": True, "max_tasks": 64, "summary_max_chars": 300}
+        with mock.patch.object(LOOP, "get_api_key", return_value="k"):
+            loop = LOOP.ElieveLoop(task="t", outdir=outdir,
+                                   model="ag/gemini-3-flash",
+                                   tasks_cfg=cfg, **kw)
+        if pre:
+            pre(loop)
+        captured = {}
 
-    def test_unknown_profile_falls_back_to_default(self):
-        self.assertEqual(get_system_prompt("en", profile="nope"),
-                         get_system_prompt("en"))
+        def fake_call(messages, model, provider_cfg, api_key=None,
+                      tools=None):
+            captured["messages"] = [dict(m) for m in messages]
+            return ({"content": "done", "tool_calls": None},
+                    {"prompt_tokens": 50})
 
-    def test_profiles_differ(self):
-        self.assertNotEqual(get_system_prompt("en", profile="default"),
-                            get_system_prompt("en", profile="hunter"))
+        with mock.patch.object(LOOP, "call_model", side_effect=fake_call):
+            rc = loop.run()
+        return rc, captured["messages"]
+
+    def test_loop_default_system_prompt_is_empty(self):
+        with mock.patch.object(LOOP, "get_api_key", return_value="k"):
+            loop = LOOP.ElieveLoop(task="t", outdir=tempfile.mkdtemp(),
+                                   model="ag/gemini-3-flash")
+        self.assertEqual(loop.system_prompt, "")
+
+    def test_no_system_message_when_prompt_empty(self):
+        d = tempfile.mkdtemp()
+        rc, messages = self._run_and_capture(d, system_prompt="")
+        self.assertEqual(rc, 0)
+        roles = [m["role"] for m in messages]
+        self.assertNotIn("system", roles,
+                         "empty prompt must not send a system message")
+        self.assertEqual(messages[0]["role"], "user")
+
+    def test_system_message_present_when_prompt_supplied(self):
+        d = tempfile.mkdtemp()
+        rc, messages = self._run_and_capture(d,
+                                             system_prompt="You are Bob.")
+        self.assertEqual(rc, 0)
+        self.assertEqual(messages[0]["role"], "system")
+        self.assertIn("You are Bob.", messages[0]["content"])
+
+    def test_task_block_creates_system_message_on_demand(self):
+        # Empty operator prompt + tasks present: the per-turn task block
+        # creates the system message (it carries the block), rather than
+        # polluting the user message.
+        d = tempfile.mkdtemp()
+
+        def pre(loop):
+            loop.tasks.add("Audit auth.py")
+
+        rc, messages = self._run_and_capture(d, system_prompt="", pre=pre)
+        self.assertEqual(rc, 0)
+        self.assertEqual(messages[0]["role"], "system")
+        self.assertIn("## Daftar task", messages[0]["content"])
+        self.assertEqual(messages[1]["role"], "user")
+        self.assertEqual(messages[1]["content"], "t")
+
+
+class TestResumeSystemDetection(unittest.TestCase):
+    """--resume must detect the system message by role, not position."""
+
+    def _resume_and_capture(self, record):
+        d = tempfile.mkdtemp()
+        cfg = {"enabled": True, "max_tasks": 64, "summary_max_chars": 300}
+        with mock.patch.object(LOOP, "get_api_key", return_value="k"):
+            loop = LOOP.ElieveLoop(task="t", outdir=d,
+                                   model="ag/gemini-3-flash",
+                                   tasks_cfg=cfg, resume_record=record)
+        captured = {}
+
+        def fake_call(messages, model, provider_cfg, api_key=None,
+                      tools=None):
+            captured["messages"] = [dict(m) for m in messages]
+            return ({"content": "done", "tool_calls": None},
+                    {"prompt_tokens": 50})
+
+        with mock.patch.object(LOOP, "call_model", side_effect=fake_call):
+            rc = loop.run()
+        return rc, captured["messages"]
+
+    def test_resume_keeps_system_message(self):
+        record = {
+            "version": 1, "step": 1,
+            "messages": [
+                {"role": "system", "content": "You are Bob."},
+                {"role": "user", "content": "t"},
+                {"role": "assistant", "content": "hi"},
+            ],
+            "state": {},
+        }
+        rc, messages = self._resume_and_capture(record)
+        self.assertEqual(rc, 0)
+        self.assertEqual(messages[0]["role"], "system")
+        self.assertIn("You are Bob.", messages[0]["content"])
+
+    def test_resume_without_system_message(self):
+        # Checkpoint from a prompt-less run: messages[0] is the user task
+        # and must NOT be mistaken for a system prompt.
+        record = {
+            "version": 1, "step": 1,
+            "messages": [
+                {"role": "user", "content": "t"},
+                {"role": "assistant", "content": "hi"},
+            ],
+            "state": {},
+        }
+        rc, messages = self._resume_and_capture(record)
+        self.assertEqual(rc, 0)
+        self.assertEqual(messages[0]["role"], "user")
+        self.assertEqual(messages[0]["content"], "t")
 
 
 if __name__ == "__main__":

@@ -1,4 +1,46 @@
-# Rework default system prompt — generic + Anthropic-style (2026-10-11)
+# Rework default system prompt — STRIP TOTAL: kosong by design (2026-10-11)
+
+## Fase 2 — strip (perintah final Bayu)
+
+> "Gausah ada system prompt, gausah ada soul.md bawaan, gausah ada
+> aturan2 atau mode hunter dll. Bikin kosongan — tapi jelas: hermes
+> versi antropik = elieve."
+
+Fase 1 (generik + hunter opt-in, commit `eb4ad79`) KEJAUHAN. Keputusan
+final: **NOL bawaan**. Framework ship kosong; user yang isi.
+
+### Yang dihapus
+- `elieve/prompts/en.py`, `elieve/prompts/id.py`,
+  `elieve/prompts/hunter.py` — DIHAPUS total.
+- Flag CLI `--profile` + key config `profile:` — dicabut dari
+  `elieve/loop.py` dan `elieve/planmode.py`. Tidak ada mode sama sekali.
+- `configs/bug-hunter.yaml`: blok `profile: hunter` dihapus.
+
+### Yang dipertahankan (kosong, bukan persona)
+- `elieve/prompts/__init__.py` — `get_system_prompt(...)` tetap ada
+  (backward compat) tapi SELALU return `""`. Semua argumen diterima dan
+  diabaikan. Tidak ada soul.md (memang tidak pernah ada di repo).
+- `system_prompt` eksplisit via config/CLI — tetap didukung, itu cara
+  user mengisi kekosongan.
+- Loop TIDAK mengirim system message sama sekali bila kosong (skip,
+  bukan `{"role":"system","content":""}`).
+  - `run()`: `has_system` tracking; resume mendeteksi system message by
+    role (bukan asumsi posisi); task block per-turn membuat system
+    message on-demand bila tasks ada.
+  - Operational notices (memory recall, MODE BACA-SAJA, plan addendum)
+    tetap ada — itu mekanik harness, bukan persona.
+
+### Hasil tes
+- `python3 -m unittest discover -s tests` → **299 tests, OK**
+  (288 base − 16 fase-1 + 11 kontrak kekosongan baru + penyesuaian
+  `test_checkpoints.py` untuk default tanpa system message)
+- `tests/test_prompts.py` ditulis ulang jadi kontrak kekosongan:
+  `get_system_prompt` → `""` untuk semua input; tidak ada file prompt
+  bawaan; tidak ada `hunter`/persona di package; tidak ada file
+  `*soul*` di repo; loop skip system message saat kosong; task block
+  on-demand; resume deteksi by role.
+
+## Fase 1 — generik + hunter opt-in (commit `eb4ad79`, DIGANTI fase 2)
 
 Perintah Bayu: repo publik `elieve-dev/elieve` tidak bisa pakai default
 persona bug hunter + aturan keras ("refusal mode"). Default harus generik,

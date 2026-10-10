@@ -1,53 +1,22 @@
-"""elieve.prompts — system prompts: generic default + opt-in profiles.
+"""elieve.prompts — intentionally empty.
 
-Use :func:`get_system_prompt` to fetch a prompt::
+elieve ("Hermes, Anthropic-style") ships with NO built-in system prompt,
+persona, soul.md, rules, or modes. The framework is blank by design: the
+operator brings their own prompt — or runs with none at all.
 
-    get_system_prompt("en")                    # generic default (English)
-    get_system_prompt("id", profile="hunter")  # bug-hunter profile (Indonesian)
-
-``profile`` selects a persona preset:
-
-- ``"default"`` — neutral general-purpose agent (the default).
-- ``"hunter"`` — security bug-hunter persona (strict evidence rules).
-
-Unknown profiles fall back to ``"default"``; unknown language codes fall
-back to English. The ``{WORKSPACE_ROOT}`` placeholder is replaced with the
-given workspace root (``"./workspace"`` when omitted).
-
-Backward compatible: ``get_system_prompt(lang)`` behaves exactly as
-before, returning the (now generic) default prompt.
+:func:`get_system_prompt` is kept for backward compatibility and ALWAYS
+returns ``""``. Supply a prompt explicitly via the ``system_prompt``
+config key or the ``--system-prompt`` CLI flag. When nothing is
+supplied, the loop sends NO system message at all.
 """
 
-from .en import SYSTEM_PROMPT as EN_SYSTEM_PROMPT
-from .hunter import HUNTER_SYSTEM_PROMPT_EN, HUNTER_SYSTEM_PROMPT_ID
-from .id import SYSTEM_PROMPT as ID_SYSTEM_PROMPT
-
-_PROFILES = {
-    "default": {"en": EN_SYSTEM_PROMPT, "id": ID_SYSTEM_PROMPT},
-    "hunter": {"en": HUNTER_SYSTEM_PROMPT_EN, "id": HUNTER_SYSTEM_PROMPT_ID},
-}
-
-__all__ = [
-    "get_system_prompt",
-    "EN_SYSTEM_PROMPT",
-    "ID_SYSTEM_PROMPT",
-    "HUNTER_SYSTEM_PROMPT_EN",
-    "HUNTER_SYSTEM_PROMPT_ID",
-]
+__all__ = ["get_system_prompt"]
 
 
 def get_system_prompt(lang="en", workspace_root=None, profile="default"):
-    """Return the system prompt for ``lang`` and ``profile``.
+    """Return the built-in system prompt: always ``""``.
 
-    Args:
-        lang: ``"en"`` or ``"id"`` (anything else falls back to ``"en"``).
-        workspace_root: substituted into the ``{WORKSPACE_ROOT}``
-            placeholder; defaults to ``"./workspace"`` when omitted.
-        profile: ``"default"`` (generic agent) or ``"hunter"``
-            (bug-hunter persona). Unknown values fall back to ``"default"``.
+    All arguments are accepted for backward compatibility and ignored —
+    there is no default persona, in any language, under any profile.
     """
-    presets = _PROFILES.get((profile or "default").strip().lower(),
-                            _PROFILES["default"])
-    template = presets.get((lang or "en").strip().lower(), presets["en"])
-    root = workspace_root if workspace_root else "./workspace"
-    return template.replace("{WORKSPACE_ROOT}", str(root))
+    return ""
