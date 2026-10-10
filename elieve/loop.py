@@ -869,6 +869,9 @@ def main(argv=None) -> int:
     ap.add_argument("--lang", default=None, choices=["en", "id"],
                     help="default prompt language: en|id "
                          "(overrides config language)")
+    ap.add_argument("--profile", default=None, choices=["default", "hunter"],
+                    help="prompt persona profile: default (generic) | hunter "
+                         "(bug-hunter; overrides config profile)")
     ap.add_argument(
         "--tidy",
         action="store_true",
@@ -967,8 +970,17 @@ def main(argv=None) -> int:
     # Effective model: CLI flag > top-level config 'model:' > provider.model.
     model = (args.model or cfg.get("model") or provider_cfg.model or "").strip()
 
-    # Default system prompt for the language; explicit config/CLI wins.
-    default_prompt = get_system_prompt(lang, workspace_root=workspace_root)
+    # Prompt persona profile: 'default' (generic) or 'hunter' (bug-hunter).
+    # Explicit config/CLI system_prompt still wins over everything.
+    profile = (args.profile or cfg.get("profile") or "default").strip().lower()
+    if profile not in ("default", "hunter"):
+        sys.stderr.write(
+            f"warning: unknown profile {profile!r} — falling back to 'default'.\n")
+        profile = "default"
+
+    # Default system prompt for the language+profile; explicit config/CLI wins.
+    default_prompt = get_system_prompt(lang, workspace_root=workspace_root,
+                                       profile=profile)
     system_prompt = (args.system_prompt or cfg.get("system_prompt")
                      or default_prompt)
 
@@ -997,6 +1009,7 @@ def main(argv=None) -> int:
                           or cfg.get("max_steps", args.max_steps)),
             lang=lang,
             workspace_root=workspace_root,
+            profile=profile,
             system_prompt=args.system_prompt or cfg.get("system_prompt"),
             compaction_cfg=cfg.get("compaction"),
             memory_cfg=memory_cfg or None,

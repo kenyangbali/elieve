@@ -38,6 +38,10 @@ workspace_root: /home/hatch/workspace
 # Default system-prompt language: en | id ('system_prompt' below still overrides).
 language: id
 
+# Prompt persona profile: default (generic agent) | hunter (bug-hunter).
+# The hunter profile restores the strict evidence-first persona.
+profile: hunter
+
 # Tool yang boleh dipakai profil ini (subset dari elieve/tools).
 tools:
   - read_file

@@ -127,12 +127,14 @@ Runs the full unit suite (no network/API key needed).
 ```
 elieve --task TASK --outdir OUTDIR [--model MODEL] [--max-steps MAX_STEPS]
        [--config CONFIG] [--system-prompt SYSTEM_PROMPT] [--workspace WORKSPACE]
-       [--lang {en,id}] [--tidy] [--no-exec]
+       [--lang {en,id}] [--profile {default,hunter}] [--tidy] [--no-exec]
 ```
 
 - `--model` overrides the config's model; `--max-steps` caps ReAct
   steps (default 40).
 - `--lang` selects the default system prompt (`en` | `id`).
+- `--profile` selects the prompt persona: `default` (generic agent) or
+  `hunter` (strict bug-hunter persona, opt-in).
 - `--tidy` runs `autoDream` cleanup on the outdir's `MEMORY.md` and
   exits (no task is run).
 - `--no-exec` drops the `exec` tool for a read-only run (used by
@@ -157,6 +159,7 @@ Other top-level keys:
 | `model_policy` | `allow:` / `forbid:` model prefix lists (trailing `*` wildcards; `forbid` wins). Empty = unrestricted. |
 | `workspace_root` | Sandbox root for tools (relative = resolved from cwd; `/tmp` always allowed) |
 | `language` | Default system-prompt language: `en` or `id` (CLI `--lang` overrides) |
+| `profile` | Prompt persona: `default` (generic agent) or `hunter` (bug-hunter, opt-in). CLI `--profile` overrides. Explicit `system_prompt` still wins over both. |
 
 Note: `configs/bug-hunter.yaml` is a personal, Indonesian-language
 example profile (built around a local gateway setup), **not** the

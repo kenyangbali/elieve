@@ -176,6 +176,7 @@ def write_plan_md(outdir, task, model, final_text, lang="en",
 
 def run_plan(task, outdir, model, provider_cfg=None, model_policy=None,
              max_steps=30, lang="en", workspace_root=None,
+             profile="default",
              system_prompt=None, compaction_cfg=None, memory_cfg=None,
              permissions_cfg=None, hooks_cfg=None, tasks_cfg=None,
              accounting_cfg=None, checkpoints_cfg=None,
@@ -193,7 +194,8 @@ def run_plan(task, outdir, model, provider_cfg=None, model_policy=None,
     outdir = os.path.abspath(outdir)
     lg = _lang(lang)
     base = (system_prompt if system_prompt is not None
-            else get_system_prompt(lg, workspace_root=workspace_root))
+            else get_system_prompt(lg, workspace_root=workspace_root,
+                                   profile=profile))
     prompt = base + PLAN_ADDENDUM[lg]
     loop = ElieveLoop(
         task=task,
